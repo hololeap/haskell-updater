@@ -7,6 +7,9 @@
    This module defines helper functions to find broken packages in
    GHC, or else find packages installed with older versions of GHC.
  -}
+
+{-# LANGUAGE LambdaCase #-}
+
 module Distribution.Gentoo.GHC
        ( ghcVersion
        , ghcLoc
@@ -23,12 +26,14 @@ import Distribution.Gentoo.Packages
 -- Cabal imports
 import Distribution.Package(PackageIdentifier, packageId)
 import Distribution.InstalledPackageInfo(InstalledPackageInfo)
+import Distribution.Simple.Utils (die')
 import Distribution.Text(display)
+import qualified Distribution.Verbosity as V
 
 -- Other imports
 import Data.Char(isDigit)
 import Data.Either(partitionEithers)
-import Data.Maybe
+import Data.Maybe (catMaybes)
 import qualified Data.List as L
 import qualified Data.Map as Map
 import qualified Data.ByteString.Char8 as BS
@@ -59,10 +64,21 @@ rawCommand cmd args = readProcess cmd args ""
 ghcRawOut      :: [String] -> IO String
 ghcRawOut args = ghcLoc >>= flip rawSysStdOutLine args
 
--- Cheat with using fromJust since we know that GHC must be in $PATH
--- somewhere, probably /usr/bin.
+-- | Find an executable in $PATH. If it doesn't exist, 'die'' with an
+--   error.
+findExe
+    :: String -- ^ The executable to search for
+    -> IO FilePath
+findExe exe = findExecutable exe >>= \case
+    Just e  -> pure e
+    Nothing -> die' V.normal $
+        "Could not find '" ++ show exe ++ "' executable on system"
+
 ghcLoc :: IO FilePath
-ghcLoc = fromJust <$> findExecutable "ghc"
+ghcLoc = findExe "ghc"
+
+ghcPkgLoc :: IO FilePath
+ghcPkgLoc = findExe "ghc-pkg"
 
 -- The version of GHC installed.
 ghcVersion :: IO String
@@ -74,11 +90,6 @@ ghcLibDir = canonicalizePath =<< ghcRawOut ["--print-libdir"]
 
 ghcPkgRawOut      :: [String] -> IO String
 ghcPkgRawOut args = ghcPkgLoc >>= flip rawCommand args
-
--- Cheat with using fromJust since we know that ghc-pkg must be in $PATH
--- somewhere, probably /usr/bin.
-ghcPkgLoc :: IO FilePath
-ghcPkgLoc = fromJust <$> findExecutable "ghc-pkg"
 
 data ConfSubdir = GHCConfs
                 | GentooConfs

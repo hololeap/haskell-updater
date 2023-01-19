@@ -103,7 +103,7 @@ getTargetPackages v t =
                           say v "Searching for Haskell libraries with broken dependencies."
                           say v ""
                           (broken, unknown_packages, unknown_files) <- brokenPkgs v
-                          printUnknownPackagesLn (map unCPV unknown_packages)
+                          printUnknownPackagesLn (map showPackageId unknown_packages)
                           printUnknownFilesLn unknown_files
                           pkgListPrintLn v "broken" (notGHC broken)
 

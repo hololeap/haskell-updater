@@ -11,29 +11,39 @@
 {-# LANGUAGE LambdaCase #-}
 
 module Distribution.Gentoo.GHC
-       ( ghcVersion
+       ( CabalPkg(..)
+       , Cabal.PackageId
+       , showPackageId
+       , ghcVersion
        , ghcLoc
        , ghcLibDir
        , oldGhcPkgs
        , brokenPkgs
        , allInstalledPackages
-       , unCPV
        ) where
 
 import Distribution.Gentoo.Util
 import Distribution.Gentoo.Packages
 
 -- Cabal imports
-import Distribution.Package(PackageIdentifier, packageId)
-import Distribution.InstalledPackageInfo(InstalledPackageInfo)
+import qualified Distribution.InstalledPackageInfo as Cabal
+    ( InstalledPackageInfo(..)
+    , parseInstalledPackageInfo
+    )
+import Distribution.Parsec (simpleParsec)
+import Distribution.Pretty (Pretty(..))
 import Distribution.Simple.Utils (die')
-import Distribution.Text(display)
+import qualified Distribution.Types.PackageId as Cabal
+    ( PackageId
+    -- , PackageIdentifier(..)
+    )
 import qualified Distribution.Verbosity as V
+import Text.PrettyPrint (render)
 
 -- Other imports
 import Data.Char(isDigit)
-import Data.Either(partitionEithers)
-import Data.Maybe (catMaybes)
+import Data.Either(partitionEithers, rights)
+import Data.Maybe (catMaybes, isJust)
 import qualified Data.List as L
 import qualified Data.Map as Map
 import qualified Data.ByteString.Char8 as BS
@@ -91,6 +101,9 @@ ghcLibDir = canonicalizePath =<< ghcRawOut ["--print-libdir"]
 ghcPkgRawOut      :: [String] -> IO String
 ghcPkgRawOut args = ghcPkgLoc >>= flip rawCommand args
 
+showPackageId :: Cabal.PackageId -> String
+showPackageId = render . pretty
+
 data ConfSubdir = GHCConfs
                 | GentooConfs
 
@@ -117,18 +130,28 @@ listConfFiles subdir = do
 tryMaybe     :: (a -> Maybe b) -> a -> Either a b
 tryMaybe f a = maybe (Left a) Right $ f a
 
-newtype CabalPV = CPV { unCPV :: String } -- serialized 'PackageIdentifier'
-    deriving (Ord, Eq, Show)
+data CabalPkg
+    = CabalPkg
+    { cabalConfPath :: FilePath
+    , cabalConfInfo :: Cabal.InstalledPackageInfo
+    }
+    deriving (Show, Eq)
 
--- Unique (normal) or multiple (broken) mapping
-type ConfMap = Map.Map CabalPV [FilePath]
+instance Ord CabalPkg where
+    CabalPkg fp1 _ `compare` CabalPkg fp2 _ = fp1 `compare` fp2
 
-pushConf :: ConfMap -> CabalPV -> FilePath -> ConfMap
-pushConf m k v = Map.insertWith (++) k [v] m
+-- | Unique (normal) or multiple (broken) mapping
+type ConfMap = Map.Map Cabal.PackageId [CabalPkg]
 
--- Attempt to match the provided broken package to one of the
+pushConf :: ConfMap -> Cabal.PackageId -> FilePath -> Cabal.InstalledPackageInfo -> ConfMap
+pushConf m k p ipi = Map.insertWith (++) k [CabalPkg p ipi] m
+
+-- | Attempt to match the provided broken package to one of the
 -- installed packages.
-matchConf :: ConfMap -> CabalPV -> Either CabalPV [FilePath]
+matchConf
+    :: ConfMap
+    -> Cabal.PackageId
+    -> Either Cabal.PackageId [CabalPkg]
 matchConf = tryMaybe . flip Map.lookup
 
 -- Fold Gentoo .conf files from the current GHC version and
@@ -136,59 +159,35 @@ matchConf = tryMaybe . flip Map.lookup
 foldConf :: Verbosity -> [FilePath] -> IO ConfMap
 foldConf v = foldM (addConf v) Map.empty
 
--- cabal package text format
--- "[InstalledPackageInfo {installedPackageId = Insta..."
-parse_as_cabal_package :: String -> Maybe CabalPV
-parse_as_cabal_package cont =
-    case reads cont of
-        []       -> Nothing
-        -- ebuilds that have CABAL_CORE_LIB_GHC_PV set
-        -- for this version of GHC will have a .conf
-        -- file containing just []
-        [([],_)] -> Nothing
-        rd       -> Just $ CPV $ display $ cfNm rd
-  where
-    cfNm :: [([InstalledPackageInfo], String)] -> PackageIdentifier
-    cfNm = packageId . head . fst . head
-
--- ghc package text format
--- "name: zlib-conduit\n
---  version: 1.1.0\n
---  id: zlib-condui..."
-parse_as_ghc_package :: BS.ByteString -> Maybe CabalPV
-parse_as_ghc_package cont =
-    case (map BS.words . BS.lines) cont of
-        ( [name_key, bn] : [ver_key, bv] : _)
-            | name_key == BS.pack "name:" && ver_key == BS.pack "version:"
-            -> Just $ CPV $ BS.unpack bn ++ "-" ++ BS.unpack bv
-        _   -> Nothing
-
--- Add this .conf file to the Map
+-- | Add this .conf file to the Map
 addConf :: Verbosity -> ConfMap -> FilePath -> IO ConfMap
 addConf v cmp conf = do
     cont <- BS.readFile conf
-    case ( parse_as_ghc_package cont
-         , parse_as_cabal_package (BS.unpack cont)
-         ) of
-        (Just dn, _) -> do vsay v $ unwords [conf, "resolved as ghc package:", show dn]
-                           return $ pushConf cmp dn conf
-        (_, Just dn) -> do vsay v $ unwords [conf, "resolved as cabal package:", show dn]
-                           return $ pushConf cmp dn conf
+    case Cabal.parseInstalledPackageInfo cont of
+        Right (ws, ipi) -> do
+            let i  = Cabal.sourcePackageId ipi
+            let dn = showPackageId i
+            vsay v $ unwords [conf, "resolved:", show dn]
+            unless (null ws) $ do
+                vsay v $ "    Warnings:"
+                forM_ ws $ \w -> do
+                    vsay v $ "        " ++ w
+            pure $ pushConf cmp i conf ipi
         -- empty files are created for
         -- phony packages like CABAL_CORE_LIB_GHC_PV
         -- and binary-only packages.
-        _ | BS.null cont
-                     -> return cmp
-        _            -> do say v $ unwords [ "failed to parse"
-                                           , show conf
-                                           , ":"
-                                           , show (BS.take 30 cont)
-                                           ]
-                           return cmp
+        Left ne | BS.null cont -> return cmp
+                | otherwise -> do
+                    say v $ unwords [ "failed to parse"
+                                    , show conf
+                                    , ":"
+                                    ]
+                    forM_ ne $ \e -> say v $ "    " ++ show e
+                    return cmp
 
 checkPkgs :: Verbosity
-             -> ([CabalPV], [FilePath])
-             -> IO ([Package],[CabalPV],[FilePath])
+             -> ([Cabal.PackageId], [FilePath])
+             -> IO ([Package],[Cabal.PackageId],[FilePath])
 checkPkgs v (pns, gentoo_cnfs) = do
        files_to_pkgs <- resolveFiles gentoo_cnfs
        let (gentoo_files, pkgs) = unzip files_to_pkgs
@@ -253,44 +252,44 @@ libFronts = map BS.pack
 -- -----------------------------------------------------------------------------
 
 -- Finding broken packages in this install of GHC.
-brokenPkgs :: Verbosity -> IO ([Package],[CabalPV],[FilePath])
+brokenPkgs :: Verbosity -> IO ([Package],[Cabal.PackageId],[FilePath])
 brokenPkgs v = brokenConfs v >>= checkPkgs v
 
--- .conf files from broken packages of this GHC version
+-- | .conf files from broken packages of this GHC version
 -- Returns two lists:
--- '[CabalPV]' - list of broken cabal packages we could not resolve
---               to Gentoo's .conf files
--- '[FilePath]' - list of '.conf' files resolved from broken
---                CabalPV reported by 'ghc-pkg check'
-brokenConfs :: Verbosity -> IO ([CabalPV], [FilePath])
+-- * @['Cabal.PackageId']@ - list of broken cabal packages we could not resolve
+--                           to Gentoo's .conf files
+-- * @['FilePath']@ - list of '.conf' files resolved from broken
+--                    PackageId reported by 'ghc-pkg check'
+brokenConfs :: Verbosity -> IO ([Cabal.PackageId], [FilePath])
 brokenConfs v =
     do vsay v "brokenConfs: getting broken output from 'ghc-pkg'"
-       ghc_pkg_brokens <- getBrokenGhcPkg
+       ghc_pkg_brokens <- getBrokenGhcPkg v
        vsay v $ unwords ["brokenConfs: resolving Cabal package names to gentoo equivalents."
                         , show (length ghc_pkg_brokens)
                         , "Cabal packages are broken:"
-                        , unwords $ map unCPV ghc_pkg_brokens
+                        , unwords $ showPackageId <$> ghc_pkg_brokens
                         ]
 
        (orphan_broken, orphan_confs) <- getOrphanBroken
        vsay v $ unwords [ "brokenConfs: ghc .conf orphans:"
                         , show (length orphan_broken)
                         , "are orphan:"
-                        , unwords $ map unCPV orphan_broken
+                        , unwords $ showPackageId <$> orphan_broken
                         ]
 
        installed_but_not_registered <- getNotRegistered v
        vsay v $ unwords [ "brokenConfs: ghc .conf not registered:"
                         , show (length installed_but_not_registered)
                         , "are not registered:"
-                        , unwords $ map unCPV installed_but_not_registered
+                        , unwords $ showPackageId <$> installed_but_not_registered
                         ]
 
        registered_twice <- getRegisteredTwice v
        vsay v $ unwords [ "brokenConfs: ghc .conf registered twice:"
                         , show (length registered_twice)
                         , "are registered twice:"
-                        , unwords $ map unCPV registered_twice
+                        , unwords $ showPackageId <$> registered_twice
                         ]
 
        let all_broken = concat [ ghc_pkg_brokens
@@ -303,15 +302,23 @@ brokenConfs v =
        cnfs <- listConfFiles GentooConfs >>= foldConf v
        vsay v $ "brokenConfs: got " ++ show (Map.size cnfs) ++ " '*.conf' files"
        let (known_broken, orphans) = partitionEithers $ map (matchConf cnfs) all_broken
-       return (known_broken, orphan_confs ++ L.concat orphans)
+       return (known_broken, orphan_confs ++ map cabalConfPath (L.concat orphans))
 
 -- Return the closure of all packages affected by breakage
 -- in format of ["name-version", ... ]
-getBrokenGhcPkg :: IO [CabalPV]
-getBrokenGhcPkg = map CPV . words
-                  <$> ghcPkgRawOut ["check", "--simple-output"]
+getBrokenGhcPkg :: Verbosity -> IO [Cabal.PackageId]
+getBrokenGhcPkg v = do
+    s <- ghcPkgRawOut ["check", "--simple-output"]
+    catMaybes <$> traverse check (words s)
+  where
+    check :: String -> IO (Maybe Cabal.PackageId)
+    check s = do
+        let mpid = simpleParsec s
+        unless (isJust mpid) $
+            say v $ unwords ["Unable to parse as PackageId:", show s]
+        pure mpid
 
-getOrphanBroken :: IO ([CabalPV], [FilePath])
+getOrphanBroken :: IO ([Cabal.PackageId], [FilePath])
 getOrphanBroken = do
        -- Around Jan 2015 we have started to install
        -- all the .conf files in 'src_install()' phase.
@@ -320,9 +327,11 @@ getOrphanBroken = do
        confs_to_pkgs <- resolveFiles registered_confs
        let (conf_files, _conf_pkgs) = unzip confs_to_pkgs
            orphan_conf_files = registered_confs L.\\ conf_files
-       orphan_packages <- fmap catMaybes $
-                              forM orphan_conf_files $
-                                  fmap parse_as_ghc_package . BS.readFile
+       orphan_packages <- fmap rights $
+                            forM orphan_conf_files $ \conf -> do
+                                bs <- BS.readFile conf
+                                let ipi = Cabal.parseInstalledPackageInfo bs
+                                pure $ Cabal.sourcePackageId . snd <$> ipi
        return (orphan_packages, orphan_conf_files)
 
 -- Return packages, that seem to have
@@ -330,7 +339,7 @@ getOrphanBroken = do
 -- but are not registered in package.conf.d.
 -- Usually happens on manual cleaning or
 -- due to unregistration bugs in old eclass.
-getNotRegistered :: Verbosity -> IO [CabalPV]
+getNotRegistered :: Verbosity -> IO [Cabal.PackageId]
 getNotRegistered v = do
     installed_confs  <- listConfFiles GentooConfs >>= foldConf v
     registered_confs <- listConfFiles GHCConfs >>= foldConf v
@@ -346,7 +355,7 @@ getNotRegistered v = do
 --   transformers-0.4.3.0-ghc-7.8.4-{abi}.conf
 --   transformers-0.4.3.0-{abi}.conf
 -- It's is easy to fix just by reinstalling transformers.
-getRegisteredTwice :: Verbosity -> IO [CabalPV]
+getRegisteredTwice :: Verbosity -> IO [Cabal.PackageId]
 getRegisteredTwice v = do
     registered_confs <- listConfFiles GHCConfs >>= foldConf v
     let registered_twice = Map.filter (\fs -> length fs > 1) registered_confs

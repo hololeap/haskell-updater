@@ -7,14 +7,16 @@
    The executable module of haskell-updater, which finds Haskell
    packages to rebuild after a dep upgrade or a GHC upgrade.
 -}
+
+{-# LANGUAGE FlexibleContexts #-}
+
 module Main (main) where
 
 import Distribution.Gentoo.GHC
 import Distribution.Gentoo.Packages
 import Distribution.Gentoo.PkgManager
 
-import           Control.Monad         (unless)
-import qualified Control.Monad         as CM
+import           Control.Monad.Reader
 import           Data.Char             (toLower)
 import           Data.Either           (partitionEithers)
 import           Data.Map              (Map)
@@ -42,9 +44,11 @@ main = do args <- getArgs
 
 runAction :: RunModifier -> IO a
 runAction rm
-    | showHelp rm    = help
-    | showVer rm     = version
+    | showHelp rm    = runSayM v help
+    | showVer rm     = runSayM v version
     | otherwise      = runDriver rm
+  where
+    v = verbosity rm
 
 -- set of packages to rebuild at pass number
 type DriverHistory = M.Map (Set.Set Package) Int
@@ -52,38 +56,38 @@ type DriverHistory = M.Map (Set.Set Package) Int
 initialHistory :: DriverHistory
 initialHistory = M.empty
 
-dumpHistory :: Verbosity -> DriverHistory -> IO ()
-dumpHistory v historyMap = do
-    say v "Updater's past history:"
-    CM.forM_ historyList $ \(n, entry) ->
-      say v $ unwords $ ["Pass", show n, ":"] ++ map printPkg (Set.toList entry)
+dumpHistory :: MonadSay m => DriverHistory -> m ()
+dumpHistory historyMap = do
+    say "Updater's past history:"
+    forM_ historyList $ \(n, entry) ->
+      say $ unwords $ ["Pass", show n, ":"] ++ map printPkg (Set.toList entry)
   where historyList :: [(Int, Set.Set Package)]
         historyList = L.sort [ (n, entry) | (entry, n) <- M.toList historyMap ]
 
 runDriver :: RunModifier -> IO a
 runDriver rm = do
-    systemInfo v rm t
-    updaterPass 1 initialHistory
-    success v "done!"
+    runSayM v $ systemInfo rm t
+    runEnvM v $ updaterPass 1 initialHistory
+    runSayM v $ success "done!"
   where v = verbosity rm
         t = target rm
-        updaterPass :: Int -> DriverHistory -> IO ()
+        updaterPass :: Int -> DriverHistory -> EnvM ()
         updaterPass n pastHistory = do
-            ps <- getTargetPackages v t
-            CM.when (listOnly rm) $ do
-                mapM_ (putStrLn . printPkg) ps
-                success v "done!"
-            CM.when (null ps) $
-                success (verbosity rm) "\nNothing to build!"
-            CM.when (ps `M.member` pastHistory) $ do
-                dumpHistory v pastHistory
+            ps <- getTargetPackages t
+            when (listOnly rm) $ do
+                mapM_ (liftIO . putStrLn . printPkg) ps
+                success "done!"
+            when (null ps) $
+                success "\nNothing to build!"
+            when (ps `M.member` pastHistory) $ do
+                dumpHistory pastHistory
                 die "Updater stuck in the loop and can't progress"
 
             exitCode <- buildPkgs rm (Set.toList ps)
 
             -- don't try rerun rebuilder for cases where there
             -- is no chance to converge to empty set
-            CM.when (target rm == AllInstalled) $
+            when (target rm == AllInstalled) $ liftIO $
                 exitWith exitCode
 
             -- continue rebuild attempts
@@ -93,45 +97,45 @@ data BuildTarget = OnlyInvalid
                  | AllInstalled -- Rebuild every haskell package
                    deriving (Eq, Ord, Show, Read)
 
-getTargetPackages :: Verbosity -> BuildTarget -> IO (Set Package)
-getTargetPackages v t =
+getTargetPackages :: BuildTarget -> EnvM (Set Package)
+getTargetPackages t =
     case t of
-        OnlyInvalid -> do say v "Searching for packages installed with a different version of GHC."
-                          say v ""
-                          old <- oldGhcPkgs v
-                          pkgListPrintLn v "old" (Set.toList old)
+        OnlyInvalid -> do say "Searching for packages installed with a different version of GHC."
+                          say ""
+                          old <- oldGhcPkgs
+                          pkgListPrintLn "old" (Set.toList old)
 
-                          say v "Searching for Haskell libraries with broken dependencies."
-                          say v ""
-                          (broken, unknown_packages, unknown_files) <- brokenPkgs v
+                          say "Searching for Haskell libraries with broken dependencies."
+                          say ""
+                          (broken, unknown_packages, unknown_files) <- brokenPkgs
                           printUnknownPackagesLn (map showPackageId (Set.toList unknown_packages))
                           printUnknownFilesLn (Set.toList unknown_files)
-                          pkgListPrintLn v "broken" (notGHC (Set.toList broken))
+                          pkgListPrintLn "broken" (notGHC (Set.toList broken))
 
                           return $ old <> broken
 
-        AllInstalled -> do say v "Searching for packages installed with the current version of GHC."
-                           say v ""
+        AllInstalled -> do say "Searching for packages installed with the current version of GHC."
+                           say ""
                            pkgs <- allInstalledPackages
-                           pkgListPrintLn v "installed" (Set.toList pkgs)
+                           pkgListPrintLn "installed" (Set.toList pkgs)
                            return pkgs
 
   where printUnknownPackagesLn [] = return ()
         printUnknownPackagesLn ps =
-            do say v "The following packages are orphan (not installed by your package manager):"
-               printList v id ps
-               say v ""
+            do say "The following packages are orphan (not installed by your package manager):"
+               printList id ps
+               say ""
         printUnknownFilesLn [] = return ()
         printUnknownFilesLn fs =
-            do say v $ "The following files are orphan (not installed by your package manager):"
-               printList v id fs
-               say v $ "It is strongly advised to remove orphans:"
-               say v $ "    One of known sources of orphans is packages installed before 01 Jan 2015."
-               say v $ "    If you know it's your case you can easily remove such files:"
-               say v $ "        # rm -v -- `qfile -o $(ghc --print-libdir)/package.conf.d/*.conf $(ghc --print-libdir)/gentoo/*.conf`"
-               say v $ "        # ghc-pkg recache"
-               say v $ "    It will likely need one more 'haskell-updater' run."
-               say v ""
+            do say $ "The following files are orphan (not installed by your package manager):"
+               printList id fs
+               say $ "It is strongly advised to remove orphans:"
+               say $ "    One of known sources of orphans is packages installed before 01 Jan 2015."
+               say $ "    If you know it's your case you can easily remove such files:"
+               say $ "        # rm -v -- `qfile -o $(ghc --print-libdir)/package.conf.d/*.conf $(ghc --print-libdir)/gentoo/*.conf`"
+               say $ "        # ghc-pkg recache"
+               say $ "    It will likely need one more 'haskell-updater' run."
+               say ""
 
 -- Full haskell-updater state
 data RunModifier = RM { pkgmgr   :: PkgManager
@@ -162,17 +166,17 @@ withCmdMap = M.fromList [ ("print", PrintOnly)
 defaultWithCmd :: String
 defaultWithCmd = "print-and-run"
 
-runCmd :: WithCmd -> String -> [String] -> IO ExitCode
+runCmd :: MonadIO m => WithCmd -> String -> [String] -> m ExitCode
 runCmd mode cmd args = case mode of
-        RunOnly     ->                      runCommand cmd args
-        PrintOnly   -> putStrLn cmd_line >> exitSuccess
-        PrintAndRun -> putStrLn cmd_line >> runCommand cmd args
+        RunOnly     -> runCommand cmd args
+        PrintOnly   -> liftIO $ putStrLn cmd_line >> exitSuccess
+        PrintAndRun -> liftIO $ putStrLn cmd_line >> runCommand cmd args
     where cmd_line = unwords (cmd:args)
 
-runCommand     :: String -> [String] -> IO ExitCode
-runCommand cmd args = rawSystem cmd args
+runCommand :: MonadIO m => String -> [String] -> m ExitCode
+runCommand cmd = liftIO . rawSystem cmd
 
-buildPkgs       :: RunModifier -> [Package] -> IO ExitCode
+buildPkgs :: MonadIO m => RunModifier -> [Package] -> m ExitCode
 buildPkgs rm ps = runCmd (withCmd rm) cmd args
     where
       (cmd, args) = buildCmd (pkgmgr rm) (flags rm) (rawPMArgs rm) ps
@@ -304,14 +308,14 @@ options =
 -- -----------------------------------------------------------------------------
 -- Printing information.
 
-help :: IO a
-help = progInfo >>= success Normal
+help :: (MonadSay m, MonadIO m) => m a
+help = progInfo >>= success
 
-version :: IO a
-version = fmap (++ '-' : showVersion Paths.version) getProgName >>= success Normal
+version :: (MonadSay m, MonadIO m) => m a
+version = fmap (++ '-' : showVersion Paths.version) (liftIO getProgName) >>= success
 
-progInfo :: IO String
-progInfo = do pName <- getProgName
+progInfo :: (MonadSay m, MonadIO m) => m String
+progInfo = do pName <- liftIO getProgName
               return $ usageInfo (header pName) options
   where
     header pName = unlines [ pName ++ " -- Find and rebuild packages broken due to any of:"
@@ -323,35 +327,36 @@ progInfo = do pName <- getProgName
                            , ""
                            , "Options:"]
 
-systemInfo :: Verbosity -> RunModifier -> BuildTarget -> IO ()
-systemInfo v rm t = do
+systemInfo :: RunModifier -> BuildTarget -> SayM ()
+systemInfo rm t = do
     ver    <- ghcVersion
-    pName  <- getProgName
+    pName  <- liftIO getProgName
     let pVer = showVersion Paths.version
     pLoc   <- ghcLoc
     libDir <- ghcLibDir
-    say v $ "Running " ++ pName ++ "-" ++ pVer ++ " using GHC " ++ ver
-    say v $ "  * Executable: " ++ pLoc
-    say v $ "  * Library directory: " ++ libDir
-    say v $ "  * Package manager (PM): " ++ nameOfPM (pkgmgr rm)
+    say $ "Running " ++ pName ++ "-" ++ pVer ++ " using GHC " ++ ver
+    say $ "  * Executable: " ++ pLoc
+    say $ "  * Library directory: " ++ libDir
+    say $ "  * Package manager (PM): " ++ nameOfPM (pkgmgr rm)
     unless (null (rawPMArgs rm)) $
-        say v $ "  * PM auxiliary arguments: " ++ unwords (rawPMArgs rm)
-    say v $ "  * Mode: " ++ show t
-    say v ""
+        say $ "  * PM auxiliary arguments: " ++ unwords (rawPMArgs rm)
+    say $ "  * Mode: " ++ show t
+    say ""
 
 -- -----------------------------------------------------------------------------
 -- Utility functions
 
-success :: Verbosity -> String -> IO a
-success v msg = do say v msg
-                   exitSuccess
+success :: (MonadSay m, MonadIO m) => String -> m b
+success msg = do say msg
+                 liftIO exitSuccess
 
-die     :: String -> IO a
-die msg = do putErrLn ("ERROR: " ++ msg)
-             exitWith (ExitFailure 1)
+die :: MonadIO m => String -> m a
+die msg = liftIO $ do
+    putErrLn ("ERROR: " ++ msg)
+    exitWith (ExitFailure 1)
 
-putErrLn :: String -> IO ()
-putErrLn = hPutStrLn stderr
+putErrLn :: MonadIO m => String -> m ()
+putErrLn = liftIO . hPutStrLn stderr
 
 bool       :: a -> a -> Bool -> a
 bool f t b = if b then t else f

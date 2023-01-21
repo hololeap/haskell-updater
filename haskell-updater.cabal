@@ -68,6 +68,7 @@ executable haskell-updater
     , containers
     , directory   >=1.2.5.0
     , filepath
+    , mtl
     , pretty
     , process
 

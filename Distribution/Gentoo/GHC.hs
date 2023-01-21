@@ -42,11 +42,12 @@ import Text.PrettyPrint (render)
 
 -- Other imports
 import Data.Char(isDigit)
-import Data.Either(partitionEithers, rights)
+import Data.Either (rights)
 import Data.Maybe (catMaybes, isJust)
-import qualified Data.List as L
-import qualified Data.Map as Map
+import qualified Data.Map.Strict as Map
 import qualified Data.ByteString.Char8 as BS
+import           Data.Set (Set)
+import qualified Data.Set as Set
 import System.FilePath((</>), takeExtension, pathSeparator)
 import System.Directory( canonicalizePath
                        , doesDirectoryExist
@@ -114,16 +115,16 @@ subdirToDirname subdir =
         GentooConfs -> "gentoo"
 
 -- Return the Gentoo .conf files found in this GHC libdir
-listConfFiles :: ConfSubdir -> IO [FilePath]
+listConfFiles :: ConfSubdir -> IO (Set FilePath)
 listConfFiles subdir = do
     dir <- ghcLibDir
     let gDir = dir </> subdirToDirname subdir
     exists <- doesDirectoryExist gDir
     if exists
-        then do conts <- listDirectory gDir
-                return $ map (gDir </>)
-                    $ filter isConf conts
-        else return []
+        then do conts <- Set.fromList <$> listDirectory gDir
+                return $ Set.map (gDir </>)
+                    $ Set.filter isConf conts
+        else return Set.empty
   where
     isConf file = takeExtension file == ".conf"
 
@@ -141,68 +142,71 @@ instance Ord CabalPkg where
     CabalPkg fp1 _ `compare` CabalPkg fp2 _ = fp1 `compare` fp2
 
 -- | Unique (normal) or multiple (broken) mapping
-type ConfMap = Map.Map Cabal.PackageId [CabalPkg]
+type ConfMap = Map.Map Cabal.PackageId (Set CabalPkg)
 
 pushConf :: ConfMap -> Cabal.PackageId -> FilePath -> Cabal.InstalledPackageInfo -> ConfMap
-pushConf m k p ipi = Map.insertWith (++) k [CabalPkg p ipi] m
+pushConf m k p ipi = Map.insertWith (Set.union) k (Set.singleton (CabalPkg p ipi)) m
 
 -- | Attempt to match the provided broken package to one of the
 -- installed packages.
 matchConf
     :: ConfMap
     -> Cabal.PackageId
-    -> Either Cabal.PackageId [CabalPkg]
+    -> Either Cabal.PackageId (Set CabalPkg)
 matchConf = tryMaybe . flip Map.lookup
 
 -- Fold Gentoo .conf files from the current GHC version and
 -- create a Map
-foldConf :: Verbosity -> [FilePath] -> IO ConfMap
+foldConf :: Foldable t => Verbosity -> t FilePath -> IO ConfMap
 foldConf v = foldM (addConf v) Map.empty
 
 -- | Add this .conf file to the Map
 addConf :: Verbosity -> ConfMap -> FilePath -> IO ConfMap
 addConf v cmp conf = do
     cont <- BS.readFile conf
-    case Cabal.parseInstalledPackageInfo cont of
-        Right (ws, ipi) -> do
-            let i  = Cabal.sourcePackageId ipi
-            let dn = showPackageId i
-            vsay v $ unwords [conf, "resolved:", show dn]
-            unless (null ws) $ do
-                vsay v $ "    Warnings:"
-                forM_ ws $ \w -> do
-                    vsay v $ "        " ++ w
-            pure $ pushConf cmp i conf ipi
-        -- empty files are created for
-        -- phony packages like CABAL_CORE_LIB_GHC_PV
-        -- and binary-only packages.
-        Left ne | BS.null cont -> return cmp
-                | otherwise -> do
-                    say v $ unwords [ "failed to parse"
-                                    , show conf
-                                    , ":"
-                                    ]
-                    forM_ ne $ \e -> say v $ "    " ++ show e
-                    return cmp
+    -- empty files are created for
+    -- phony packages like CABAL_CORE_LIB_GHC_PV
+    -- and binary-only packages.
+    if BS.null cont
+        then return cmp
+        else case Cabal.parseInstalledPackageInfo cont of
+            Right (ws, ipi) -> do
+                let i  = Cabal.sourcePackageId ipi
+                    dn = showPackageId i
+                vsay v $ unwords [conf, "resolved:", show dn]
+                unless (null ws) $ do
+                    vsay v $ "    Warnings:"
+                    forM_ ws $ \w -> do
+                        vsay v $ "        " ++ w
+                pure $ pushConf cmp i conf ipi
+            Left ne -> do
+                        say v $ unwords [ "failed to parse"
+                                        , show conf
+                                        , ":"
+                                        ]
+                        forM_ ne $ \e -> say v $ "    " ++ show e
+                        return cmp
 
+-- | Returns: broken, unknown_files
 checkPkgs :: Verbosity
-             -> ([Cabal.PackageId], [FilePath])
-             -> IO ([Package],[Cabal.PackageId],[FilePath])
-checkPkgs v (pns, gentoo_cnfs) = do
-       files_to_pkgs <- resolveFiles gentoo_cnfs
-       let (gentoo_files, pkgs) = unzip files_to_pkgs
-           orphan_gentoo_files = gentoo_cnfs L.\\ gentoo_files
+             -> (Set Cabal.PackageId, Set FilePath)
+             -> IO (Set Package, Set Cabal.PackageId, Set FilePath)
+checkPkgs v (pns, brokenConfs) = do
+       files_to_pkgs <- resolveFiles brokenConfs
+       let gentooFiles = Map.keysSet files_to_pkgs
+           pkgs = Set.fromList $ Map.elems files_to_pkgs
+           orphan_gentoo_files = brokenConfs Set.\\ gentooFiles
        vsay v $ unwords [ "checkPkgs: searching for gentoo .conf orphans"
                         , show (length orphan_gentoo_files)
                         , "of"
-                        , show (length gentoo_cnfs)
+                        , show (length brokenConfs)
                         ]
        return (pkgs, pns, orphan_gentoo_files)
 
 -- -----------------------------------------------------------------------------
 
 -- Finding packages installed with other versions of GHC
-oldGhcPkgs :: Verbosity -> IO [Package]
+oldGhcPkgs :: Verbosity -> IO (Set Package)
 oldGhcPkgs v =
     do thisGhc <- ghcLibDir
        vsay v $ "oldGhcPkgs ghc lib: " ++ show thisGhc
@@ -210,7 +214,7 @@ oldGhcPkgs v =
        -- It would be nice to do this, but we can't assume
        -- some crazy user hasn't deleted one of these dirs
        -- libFronts' <- filterM doesDirectoryExist libFronts
-       notGHC <$> checkLibDirs v thisGhc' libFronts
+       Set.fromList . notGHC <$> checkLibDirs v thisGhc' libFronts
 
 -- Find packages installed by other versions of GHC in this possible
 -- library directory.
@@ -251,9 +255,10 @@ libFronts = map BS.pack
 
 -- -----------------------------------------------------------------------------
 
--- Finding broken packages in this install of GHC.
-brokenPkgs :: Verbosity -> IO ([Package],[Cabal.PackageId],[FilePath])
-brokenPkgs v = brokenConfs v >>= checkPkgs v
+-- | Finding broken packages in this install of GHC.
+--   Returns: broken, unknown_packages, unknown_files
+brokenPkgs :: Verbosity -> IO (Set Package, Set Cabal.PackageId, Set FilePath)
+brokenPkgs v = findBrokenConfs v >>= checkPkgs v
 
 -- | .conf files from broken packages of this GHC version
 -- Returns two lists:
@@ -261,55 +266,63 @@ brokenPkgs v = brokenConfs v >>= checkPkgs v
 --                           to Gentoo's .conf files
 -- * @['FilePath']@ - list of '.conf' files resolved from broken
 --                    PackageId reported by 'ghc-pkg check'
-brokenConfs :: Verbosity -> IO ([Cabal.PackageId], [FilePath])
-brokenConfs v =
+findBrokenConfs :: Verbosity -> IO (Set Cabal.PackageId, Set FilePath)
+findBrokenConfs v =
     do vsay v "brokenConfs: getting broken output from 'ghc-pkg'"
        ghc_pkg_brokens <- getBrokenGhcPkg v
        vsay v $ unwords ["brokenConfs: resolving Cabal package names to gentoo equivalents."
                         , show (length ghc_pkg_brokens)
                         , "Cabal packages are broken:"
-                        , unwords $ showPackageId <$> ghc_pkg_brokens
+                        , unwords $ showPackageId <$> Set.toList ghc_pkg_brokens
                         ]
 
        (orphan_broken, orphan_confs) <- getOrphanBroken
        vsay v $ unwords [ "brokenConfs: ghc .conf orphans:"
                         , show (length orphan_broken)
                         , "are orphan:"
-                        , unwords $ showPackageId <$> orphan_broken
+                        , unwords $ showPackageId <$> Set.toList orphan_broken
                         ]
 
        installed_but_not_registered <- getNotRegistered v
        vsay v $ unwords [ "brokenConfs: ghc .conf not registered:"
                         , show (length installed_but_not_registered)
                         , "are not registered:"
-                        , unwords $ showPackageId <$> installed_but_not_registered
+                        , unwords $ showPackageId <$> Set.toList installed_but_not_registered
                         ]
 
        registered_twice <- getRegisteredTwice v
        vsay v $ unwords [ "brokenConfs: ghc .conf registered twice:"
                         , show (length registered_twice)
                         , "are registered twice:"
-                        , unwords $ showPackageId <$> registered_twice
+                        , unwords $ showPackageId <$> Set.toList registered_twice
                         ]
 
-       let all_broken = concat [ ghc_pkg_brokens
-                               , orphan_broken
-                               , installed_but_not_registered
-                               , registered_twice
-                               ]
+       let all_broken = Set.unions [ ghc_pkg_brokens
+                                   , orphan_broken
+                                   , installed_but_not_registered
+                                   , registered_twice
+                                   ]
 
        vsay v "brokenConfs: reading '*.conf' files"
        cnfs <- listConfFiles GentooConfs >>= foldConf v
        vsay v $ "brokenConfs: got " ++ show (Map.size cnfs) ++ " '*.conf' files"
-       let (known_broken, orphans) = partitionEithers $ map (matchConf cnfs) all_broken
-       return (known_broken, orphan_confs ++ map cabalConfPath (L.concat orphans))
+       let (known_broken, orphans) = partitionEithers $ Set.map (matchConf cnfs) all_broken
+       return (known_broken, orphan_confs <> Set.map cabalConfPath orphans)
+  where
+    partitionEithers :: (Ord a, Ord b) => Set (Either a (Set b)) -> (Set a, Set b)
+    partitionEithers = Set.foldr'
+        (\e (sa,sb) -> case e of
+            Left  a   -> (Set.insert a sa, sb             )
+            Right sb' -> (             sa, sb <> sb')
+        )
+        (Set.empty, Set.empty)
 
 -- Return the closure of all packages affected by breakage
 -- in format of ["name-version", ... ]
-getBrokenGhcPkg :: Verbosity -> IO [Cabal.PackageId]
+getBrokenGhcPkg :: Verbosity -> IO (Set Cabal.PackageId)
 getBrokenGhcPkg v = do
     s <- ghcPkgRawOut ["check", "--simple-output"]
-    catMaybes <$> traverse check (words s)
+    Set.fromList . catMaybes <$> traverse check (words s)
   where
     check :: String -> IO (Maybe Cabal.PackageId)
     check s = do
@@ -318,32 +331,32 @@ getBrokenGhcPkg v = do
             say v $ unwords ["Unable to parse as PackageId:", show s]
         pure mpid
 
-getOrphanBroken :: IO ([Cabal.PackageId], [FilePath])
+-- | Around Jan 2015 we have started to install
+--   all the .conf files in 'src_install()' phase.
+--   Here we pick orphan ones and notify user about it.
+getOrphanBroken :: IO (Set Cabal.PackageId, Set FilePath)
 getOrphanBroken = do
-       -- Around Jan 2015 we have started to install
-       -- all the .conf files in 'src_install()' phase.
-       -- Here we pick orphan ones and notify user about it.
-       registered_confs <- listConfFiles GHCConfs
-       confs_to_pkgs <- resolveFiles registered_confs
-       let (conf_files, _conf_pkgs) = unzip confs_to_pkgs
-           orphan_conf_files = registered_confs L.\\ conf_files
-       orphan_packages <- fmap rights $
-                            forM orphan_conf_files $ \conf -> do
-                                bs <- BS.readFile conf
-                                let ipi = Cabal.parseInstalledPackageInfo bs
-                                pure $ Cabal.sourcePackageId . snd <$> ipi
-       return (orphan_packages, orphan_conf_files)
+    registered_confs <- listConfFiles GHCConfs
+    confs_to_pkgs <- resolveFiles registered_confs
+    let conf_files = Map.keysSet confs_to_pkgs
+        orphan_conf_files = Set.toList $ registered_confs Set.\\ conf_files
+    orphan_packages <- fmap rights $
+        forM orphan_conf_files $ \conf -> do
+            bs <- BS.readFile conf
+            let ipi = Cabal.parseInstalledPackageInfo bs
+            pure $ Cabal.sourcePackageId . snd <$> ipi
+    return (Set.fromList orphan_packages, Set.fromList orphan_conf_files)
 
 -- Return packages, that seem to have
 -- been installed via emerge (have gentoo/.conf entry),
 -- but are not registered in package.conf.d.
 -- Usually happens on manual cleaning or
 -- due to unregistration bugs in old eclass.
-getNotRegistered :: Verbosity -> IO [Cabal.PackageId]
+getNotRegistered :: Verbosity -> IO (Set Cabal.PackageId)
 getNotRegistered v = do
     installed_confs  <- listConfFiles GentooConfs >>= foldConf v
     registered_confs <- listConfFiles GHCConfs >>= foldConf v
-    return $ Map.keys installed_confs L.\\ Map.keys registered_confs
+    return $ Map.keysSet installed_confs Set.\\ Map.keysSet registered_confs
 
 -- Return packages, that seem to have
 -- been installed more, than once.
@@ -355,16 +368,16 @@ getNotRegistered v = do
 --   transformers-0.4.3.0-ghc-7.8.4-{abi}.conf
 --   transformers-0.4.3.0-{abi}.conf
 -- It's is easy to fix just by reinstalling transformers.
-getRegisteredTwice :: Verbosity -> IO [Cabal.PackageId]
+getRegisteredTwice :: Verbosity -> IO (Set Cabal.PackageId)
 getRegisteredTwice v = do
     registered_confs <- listConfFiles GHCConfs >>= foldConf v
     let registered_twice = Map.filter (\fs -> length fs > 1) registered_confs
-    return $ Map.keys registered_twice
+    return $ Map.keysSet registered_twice
 
 -- -----------------------------------------------------------------------------
 
-allInstalledPackages :: IO [Package]
+allInstalledPackages :: IO (Set Package)
 allInstalledPackages = do libDir <- ghcLibDir
                           let libDir' = BS.pack libDir
-                          fmap notGHC $ pkgsHaveContent
+                          fmap (Set.fromList . notGHC) $ pkgsHaveContent
                                        $ hasDirMatching (==libDir')

@@ -21,6 +21,7 @@ import           Data.Map              (Map)
 import qualified Data.List             as L
 import qualified Data.Map              as M
 import           Data.Maybe            (fromJust)
+import           Data.Set              (Set)
 import qualified Data.Set              as Set
 import           Data.Version          (showVersion)
 import qualified Paths_haskell_updater as Paths (version)
@@ -74,11 +75,11 @@ runDriver rm = do
                 success v "done!"
             CM.when (null ps) $
                 success (verbosity rm) "\nNothing to build!"
-            CM.when (Set.fromList ps `M.member` pastHistory) $ do
+            CM.when (ps `M.member` pastHistory) $ do
                 dumpHistory v pastHistory
                 die "Updater stuck in the loop and can't progress"
 
-            exitCode <- buildPkgs rm ps
+            exitCode <- buildPkgs rm (Set.toList ps)
 
             -- don't try rerun rebuilder for cases where there
             -- is no chance to converge to empty set
@@ -86,33 +87,33 @@ runDriver rm = do
                 exitWith exitCode
 
             -- continue rebuild attempts
-            updaterPass (n + 1) $ M.insert (Set.fromList ps) n pastHistory
+            updaterPass (n + 1) $ M.insert ps n pastHistory
 
 data BuildTarget = OnlyInvalid
                  | AllInstalled -- Rebuild every haskell package
                    deriving (Eq, Ord, Show, Read)
 
-getTargetPackages :: Verbosity -> BuildTarget -> IO [Package]
+getTargetPackages :: Verbosity -> BuildTarget -> IO (Set Package)
 getTargetPackages v t =
     case t of
         OnlyInvalid -> do say v "Searching for packages installed with a different version of GHC."
                           say v ""
                           old <- oldGhcPkgs v
-                          pkgListPrintLn v "old" old
+                          pkgListPrintLn v "old" (Set.toList old)
 
                           say v "Searching for Haskell libraries with broken dependencies."
                           say v ""
                           (broken, unknown_packages, unknown_files) <- brokenPkgs v
-                          printUnknownPackagesLn (map showPackageId unknown_packages)
-                          printUnknownFilesLn unknown_files
-                          pkgListPrintLn v "broken" (notGHC broken)
+                          printUnknownPackagesLn (map showPackageId (Set.toList unknown_packages))
+                          printUnknownFilesLn (Set.toList unknown_files)
+                          pkgListPrintLn v "broken" (notGHC (Set.toList broken))
 
-                          return $ Set.toList $ Set.fromList $ old ++ broken
+                          return $ old <> broken
 
         AllInstalled -> do say v "Searching for packages installed with the current version of GHC."
                            say v ""
                            pkgs <- allInstalledPackages
-                           pkgListPrintLn v "installed" pkgs
+                           pkgListPrintLn v "installed" (Set.toList pkgs)
                            return pkgs
 
   where printUnknownPackagesLn [] = return ()

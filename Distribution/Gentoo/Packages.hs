@@ -23,6 +23,9 @@ import Data.List(isPrefixOf)
 import Data.Maybe
 import qualified Data.ByteString.Char8 as BS
 import Data.ByteString.Char8(ByteString)
+import           Data.Map.Strict (Map)
+import qualified Data.Map.Strict as M
+import           Data.Set (Set)
 import qualified Data.Set as S
 import System.Directory( doesDirectoryExist
                        , doesFileExist
@@ -170,11 +173,12 @@ parseContents cp = do ex <- doesFileExist cFile
 
 -- -----------------------------------------------------------------------------
 
--- Find all the packages that contain given files.
-resolveFiles :: [FilePath] -> IO [(FilePath, Package)]
-resolveFiles fps = expand <$> forPkg grep
+-- | Find all the packages that contain given files.
+resolveFiles :: Set FilePath -> IO (Map FilePath Package)
+resolveFiles fps = M.fromList . expand <$> forPkg grep
   where
-    fps' = S.fromList $ map (Obj . BS.pack) fps
+    fps' = S.map (Obj . BS.pack) fps
+    expand :: [(Package, [Content])] -> [(FilePath, Package)]
     expand pfs = [ (BS.unpack fn, pn)
                  | (pn, conts) <- pfs
                  , Obj fn <- conts

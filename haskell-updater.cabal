@@ -32,7 +32,7 @@ extra-source-files:
   man/haskell-updater.1
   TODO
 
-tested-with:        GHC ==8.8.4 || ==8.10.7 || ==9.0.2 || ==9.2.4
+tested-with:        GHC ==8.10.7 || ==9.0.2 || ==9.2.5
 
 source-repository head
   type:     git
@@ -64,7 +64,7 @@ executable haskell-updater
   build-depends:
     , base        >=4.12 && <5
     , bytestring
-    , Cabal       >=1.8
+    , Cabal       >=3.2
     , containers
     , directory   >=1.2.5.0
     , filepath

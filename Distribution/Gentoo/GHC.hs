@@ -37,6 +37,9 @@ import qualified Distribution.Types.PackageId as Cabal
     ( PackageId
     -- , PackageIdentifier(..)
     )
+import qualified Distribution.Types.LibraryName as Cabal
+    ( LibraryName(..)
+    )
 import qualified Distribution.Verbosity as V
 import Text.PrettyPrint (render)
 
@@ -371,8 +374,21 @@ getNotRegistered v = do
 getRegisteredTwice :: Verbosity -> IO (Set Cabal.PackageId)
 getRegisteredTwice v = do
     registered_confs <- listConfFiles GHCConfs >>= foldConf v
-    let registered_twice = Map.filter (\fs -> length fs > 1) registered_confs
+    let registered_twice = Map.filter filt registered_confs
     return $ Map.keysSet registered_twice
+  where
+    filt :: Set CabalPkg -> Bool
+    filt s =
+        -- Filter out any internal libraries that are registered, or we will
+        -- get false positives for conf files such as
+        -- attoparsec-0.14.4-Jlxx7B6z3OC4EY7gp6Rf4n-attoparsec-internal.conf
+        let noInternals = Set.filter
+                (\(CabalPkg _ ipi) -> case Cabal.sourceLibName ipi of
+                    Cabal.LMainLibName -> True
+                    Cabal.LSubLibName _ -> False
+                )
+                s
+        in length noInternals > 1
 
 -- -----------------------------------------------------------------------------
 

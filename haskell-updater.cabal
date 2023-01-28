@@ -51,6 +51,7 @@ common all
 
 executable haskell-updater
   import:           all
+  hs-source-dirs:   src-exe
   main-is:          Main.hs
   other-modules:
     Distribution.Gentoo.GHC

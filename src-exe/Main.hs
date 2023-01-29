@@ -12,12 +12,9 @@
 
 module Main (main) where
 
-import Distribution.Gentoo.GHC
-import Distribution.Gentoo.Packages
-import Distribution.Gentoo.PkgManager
 
 import           Control.Monad.Reader
-import           Data.Char             (toLower)
+import           Data.Char             (toLower, isDigit)
 import           Data.Either           (partitionEithers)
 import           Data.Map              (Map)
 import qualified Data.List             as L
@@ -33,6 +30,10 @@ import           System.Exit           (ExitCode (..), exitSuccess, exitWith)
 import           System.IO             (hPutStrLn, stderr)
 import           System.Process        (rawSystem)
 
+import Distribution.Gentoo.Env
+import Distribution.Gentoo.GHC
+import Distribution.Gentoo.Packages
+import Distribution.Gentoo.PkgManager
 import Output
 
 main :: IO ()
@@ -44,8 +45,8 @@ main = do args <- getArgs
 
 runAction :: RunModifier -> IO a
 runAction rm
-    | showHelp rm    = runSayM v help
-    | showVer rm     = runSayM v version
+    | showHelp rm    = runSayT v help
+    | showVer rm     = runSayT v version
     | otherwise      = runDriver rm
   where
     v = verbosity rm
@@ -66,12 +67,12 @@ dumpHistory historyMap = do
 
 runDriver :: RunModifier -> IO a
 runDriver rm = do
-    runSayM v $ systemInfo rm t
-    runEnvM v $ updaterPass 1 initialHistory
-    runSayM v $ success "done!"
+    runSayT v $ systemInfo rm t
+    collectEnv v >>= \e -> runEnvT v e (updaterPass 1 initialHistory)
+    runSayT v $ success "done!"
   where v = verbosity rm
         t = target rm
-        updaterPass :: Int -> DriverHistory -> EnvM ()
+        updaterPass :: Int -> DriverHistory -> EnvIO ()
         updaterPass n pastHistory = do
             ps <- getTargetPackages t
             when (listOnly rm) $ do
@@ -97,7 +98,7 @@ data BuildTarget = OnlyInvalid
                  | AllInstalled -- Rebuild every haskell package
                    deriving (Eq, Ord, Show, Read)
 
-getTargetPackages :: BuildTarget -> EnvM (Set Package)
+getTargetPackages :: BuildTarget -> EnvIO (Set Package)
 getTargetPackages t =
     case t of
         OnlyInvalid -> do say "Searching for packages installed with a different version of GHC."
@@ -327,7 +328,7 @@ progInfo = do pName <- liftIO getProgName
                            , ""
                            , "Options:"]
 
-systemInfo :: RunModifier -> BuildTarget -> SayM ()
+systemInfo :: MonadIO m => RunModifier -> BuildTarget -> SayT m ()
 systemInfo rm t = do
     ver    <- ghcVersion
     pName  <- liftIO getProgName
@@ -368,3 +369,7 @@ partitionBy f = partitionEithers . map f
 emptyElse        :: b -> ([a] -> b) -> [a] -> b
 emptyElse e _ [] = e
 emptyElse _ f as = f as
+
+-- The version of GHC installed.
+ghcVersion :: MonadIO m => m String
+ghcVersion = dropWhile (not . isDigit) <$> ghcRawOut ["--version"]

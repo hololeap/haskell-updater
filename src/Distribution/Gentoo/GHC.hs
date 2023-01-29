@@ -11,33 +11,28 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE IncoherentInstances #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 
 module Distribution.Gentoo.GHC
        (
-         -- * Environment monad
-         Env
-       , EnvM
-       , runEnvM
-       , askGhcConfMap
-       , askGhcConfFiles
-       , askGentooConfMap
-       , askVerbosity
-         -- * Everything else
-       , CabalPkg(..)
+         CabalPkg(..)
        , Cabal.PackageId
-       , showPackageId
-       , ghcVersion
-       , ghcLoc
-       , ghcLibDir
        , oldGhcPkgs
        , brokenPkgs
        , allInstalledPackages
        ) where
 
-import Distribution.Gentoo.Util
-import Distribution.Gentoo.Packages
+import qualified Data.ByteString.Char8 as BS
+import Data.Char(isDigit)
+import Data.Either (rights)
+import Data.Maybe (catMaybes, isJust)
+import qualified Data.Map.Strict as Map
+import           Data.Set (Set)
+import qualified Data.Set as Set
+import System.FilePath((</>), pathSeparator)
+import Control.Monad.Reader
 
 -- Cabal imports
 import qualified Distribution.InstalledPackageInfo as Cabal
@@ -45,8 +40,6 @@ import qualified Distribution.InstalledPackageInfo as Cabal
     , parseInstalledPackageInfo
     )
 import Distribution.Parsec (simpleParsec)
-import Distribution.Pretty (Pretty(..))
-import Distribution.Simple.Utils (die')
 import qualified Distribution.Types.PackageId as Cabal
     ( PackageId
     -- , PackageIdentifier(..)
@@ -54,163 +47,19 @@ import qualified Distribution.Types.PackageId as Cabal
 import qualified Distribution.Types.LibraryName as Cabal
     ( LibraryName(..)
     )
-import qualified Distribution.Verbosity as V
-import Text.PrettyPrint (render)
 
--- Other imports
-import Data.Char(isDigit)
-import Data.Either (rights)
-import Data.Maybe (catMaybes, isJust)
-import qualified Data.Map.Strict as Map
-import qualified Data.ByteString.Char8 as BS
-import           Data.Set (Set)
-import qualified Data.Set as Set
-import System.FilePath((</>), takeExtension, pathSeparator)
-import System.Directory( canonicalizePath
-                       , doesDirectoryExist
-                       , findExecutable
-                       , listDirectory )
-import System.Process (readProcess)
-import Control.Monad.Reader
-
+-- haskell-updater imports
+import Distribution.Gentoo.Env
+import Distribution.Gentoo.Util
+import Distribution.Gentoo.Packages
 import Output
 
-data CabalPkg
-    = CabalPkg
-    { cabalConfPath :: FilePath
-    , cabalConfInfo :: Cabal.InstalledPackageInfo
-    }
-    deriving (Show, Eq)
 
-instance Ord CabalPkg where
-    CabalPkg fp1 _ `compare` CabalPkg fp2 _ = fp1 `compare` fp2
-
-data ConfSubdir = GHCConfs
-                | GentooConfs
-
--- | Unique (normal) or multiple (broken) mapping
-type ConfMap = Map.Map Cabal.PackageId (Set CabalPkg)
-
--- | The 'ConfMap' from GHC's package index
-newtype GhcConfMap
-    = GhcConfMap { getGhcConfMap :: ConfMap }
-    deriving (Show, Eq, Ord, Semigroup, Monoid)
-
--- | All @.conf@ files from GHC's package index
---
---   Needed for 'getOrphanBroken'
-newtype GhcConfFiles
-    = GhcConfFiles { getGhcConfFiles :: Set FilePath }
-    deriving (Show, Eq, Ord, Semigroup, Monoid)
-
--- | The 'ConfMap' from the special Gentoo package index
-newtype GentooConfMap
-    = GentooConfMap { getGentooConfMap :: ConfMap }
-    deriving (Show, Eq, Ord, Semigroup, Monoid)
-
-
--- -----------------------------------------------------------------------------
--- Environment monad
--- -----------------------------------------------------------------------------
-
-type Env = (GhcConfMap, GhcConfFiles, GentooConfMap)
-
-type EnvM = ReaderT (Verbosity, Env) IO
-
-runEnvM :: Verbosity -> EnvM a -> IO a
-runEnvM v e = do
-    env <- runSayM v $ do
-        vsay "reading '*.conf' files from GHC package database"
-        ghcConfs <- listConfFiles GHCConfs
-        ghcMap  <- foldConf ghcConfs
-        vsay $ "got " ++ show (Map.size ghcMap) ++ " '*.conf' files"
-
-        vsay "reading '*.conf' files from special Gentoo package database"
-        gentooConfs <- listConfFiles GentooConfs
-        gentooMap <- foldConf gentooConfs
-        vsay $ "got " ++ show (Map.size gentooMap) ++ " '*.conf' files"
-
-        pure
-            ( GhcConfMap ghcMap
-            , GhcConfFiles ghcConfs
-            , GentooConfMap gentooMap
-            )
-
-    runReaderT e (v, env)
-
-instance MonadSay EnvM where
-    say s = do
-        v <- askVerbosity
-        liftIO $ sayIO v s
-    vsay s = do
-        v <- askVerbosity
-        liftIO $ vsayIO v s
-
-askGhcConfMap :: EnvM GhcConfMap
-askGhcConfMap = asks (\(_,(m,_,_)) -> m)
-
-askGhcConfFiles :: EnvM GhcConfFiles
-askGhcConfFiles = asks (\(_,(_,s,_)) -> s)
-
-askGentooConfMap :: EnvM GentooConfMap
-askGentooConfMap = asks (\(_,(_,_,m)) -> m)
-
-askVerbosity :: EnvM Verbosity
-askVerbosity = asks fst
 
 -- -----------------------------------------------------------------------------
 -- ConfMap manipulation
 -- -----------------------------------------------------------------------------
 
--- Return the Gentoo .conf files found in this GHC libdir
-listConfFiles :: MonadIO m => ConfSubdir -> m (Set FilePath)
-listConfFiles subdir = liftIO $ do
-    dir <- ghcLibDir
-    let gDir = dir </> subdirToDirname subdir
-    exists <- doesDirectoryExist gDir
-    if exists
-        then do conts <- Set.fromList <$> listDirectory gDir
-                return $ Set.map (gDir </>)
-                    $ Set.filter isConf conts
-        else return Set.empty
-  where
-    isConf file = takeExtension file == ".conf"
-
--- Fold Gentoo .conf files from the current GHC version and
--- create a Map
-foldConf :: (MonadSay m, MonadIO m, Foldable t)
-    => t FilePath -> m ConfMap
-foldConf = foldM addConf Map.empty
-
--- | Add this .conf file to the Map
-addConf :: (MonadSay m, MonadIO m) => ConfMap -> FilePath -> m ConfMap
-addConf cmp conf = do
-    cont <- liftIO $ BS.readFile conf
-    -- empty files are created for
-    -- phony packages like CABAL_CORE_LIB_GHC_PV
-    -- and binary-only packages.
-    if BS.null cont
-        then return cmp
-        else case Cabal.parseInstalledPackageInfo cont of
-            Right (ws, ipi) -> do
-                let i  = Cabal.sourcePackageId ipi
-                    dn = showPackageId i
-                vsay $ unwords [conf, "resolved:", show dn]
-                unless (null ws) $ do
-                    vsay "    Warnings:"
-                    forM_ ws $ \w -> do
-                        vsay $ "        " ++ w
-                pure $ pushConf cmp i conf ipi
-            Left ne -> do
-                        say $ unwords [ "failed to parse"
-                                      , show conf
-                                      , ":"
-                                      ]
-                        forM_ ne $ \e -> say $ "    " ++ show e
-                        return cmp
-
-pushConf :: ConfMap -> Cabal.PackageId -> FilePath -> Cabal.InstalledPackageInfo -> ConfMap
-pushConf m k p ipi = Map.insertWith (Set.union) k (Set.singleton (CabalPkg p ipi)) m
 
 -- | Attempt to match the provided broken package to one of the
 -- installed packages.
@@ -226,7 +75,8 @@ matchConf = tryMaybe . flip Map.lookup
 
 -- | Finding broken packages in this install of GHC.
 --   Returns: broken, unknown_packages, unknown_files
-brokenPkgs :: EnvM (Set Package, Set Cabal.PackageId, Set FilePath)
+brokenPkgs :: (MonadEnv m, MonadSay m, MonadIO m)
+    => m (Set Package, Set Cabal.PackageId, Set FilePath)
 brokenPkgs = do
     (pns, brokenConfs) <- findBrokenConfs
     (pkgs, orphanGentooFiles) <- checkPkgs brokenConfs
@@ -253,7 +103,7 @@ checkPkgs brokenConfs = do
 --                           to Gentoo's .conf files
 -- * @['FilePath']@ - list of '.conf' files resolved from broken
 --                    PackageId reported by 'ghc-pkg check'
-findBrokenConfs :: EnvM (Set Cabal.PackageId, Set FilePath)
+findBrokenConfs :: (MonadEnv m, MonadSay m, MonadIO m) => m (Set Cabal.PackageId, Set FilePath)
 findBrokenConfs =
     do GentooConfMap cnfs <- askGentooConfMap
        vsay "brokenConfs: getting broken output from 'ghc-pkg'"
@@ -318,7 +168,7 @@ getBrokenGhcPkg = do
 -- | Around Jan 2015 we have started to install
 --   all the .conf files in 'src_install()' phase.
 --   Here we pick orphan ones and notify user about it.
-getOrphanBroken :: EnvM (Set Cabal.PackageId, Set FilePath)
+getOrphanBroken :: (MonadEnv m, MonadIO m) => m (Set Cabal.PackageId, Set FilePath)
 getOrphanBroken = do
     GhcConfFiles registered_confs <- askGhcConfFiles
     confs_to_pkgs <- liftIO $ resolveFiles registered_confs
@@ -336,7 +186,7 @@ getOrphanBroken = do
 -- but are not registered in package.conf.d.
 -- Usually happens on manual cleaning or
 -- due to unregistration bugs in old eclass.
-getNotRegistered :: EnvM (Set Cabal.PackageId)
+getNotRegistered :: MonadEnv m => m (Set Cabal.PackageId)
 getNotRegistered = do
     GentooConfMap installed_confs  <- askGentooConfMap
     GhcConfMap    registered_confs <- askGhcConfMap
@@ -352,7 +202,7 @@ getNotRegistered = do
 --   transformers-0.4.3.0-ghc-7.8.4-{abi}.conf
 --   transformers-0.4.3.0-{abi}.conf
 -- It's is easy to fix just by reinstalling transformers.
-getRegisteredTwice :: EnvM (Set Cabal.PackageId)
+getRegisteredTwice :: MonadEnv m => m (Set Cabal.PackageId)
 getRegisteredTwice = do
     GhcConfMap registered_confs <- askGhcConfMap
     let registered_twice = Map.filter filt registered_confs
@@ -439,55 +289,7 @@ allInstalledPackages = do libDir <- ghcLibDir
 -- Common helper utils, etc.
 -- -----------------------------------------------------------------------------
 
--- Get only the first line of output
-rawSysStdOutLine :: MonadIO m => FilePath -> [String] -> m String
-rawSysStdOutLine app = fmap (head . lines) . rawCommand app
 
--- | Run a command and return its stdout
-rawCommand :: MonadIO m => FilePath -> [String] -> m String
-rawCommand cmd args = liftIO $ readProcess cmd args ""
-
--- Get the first line of output from calling GHC with the given
--- arguments.
-ghcRawOut :: MonadIO m => [String] -> m String
-ghcRawOut args = ghcLoc >>= flip rawSysStdOutLine args
-
--- | Find an executable in $PATH. If it doesn't exist, 'die'' with an
---   error.
-findExe
-    :: MonadIO m
-    => String -- ^ The executable to search for
-    -> m FilePath
-findExe exe = liftIO $ findExecutable exe >>= \case
-    Just e  -> pure e
-    Nothing -> die' V.normal $
-        "Could not find '" ++ show exe ++ "' executable on system"
-
-ghcLoc :: MonadIO m => m FilePath
-ghcLoc = findExe "ghc"
-
-ghcPkgLoc :: MonadIO m => m FilePath
-ghcPkgLoc = findExe "ghc-pkg"
-
--- The version of GHC installed.
-ghcVersion :: MonadIO m => m String
-ghcVersion = dropWhile (not . isDigit) <$> ghcRawOut ["--version"]
-
--- The directory where GHC has all its libraries, etc.
-ghcLibDir :: MonadIO m => m FilePath
-ghcLibDir = liftIO . canonicalizePath =<< ghcRawOut ["--print-libdir"]
-
-ghcPkgRawOut :: MonadIO m => [String] -> m String
-ghcPkgRawOut args = ghcPkgLoc >>= flip rawCommand args
-
-showPackageId :: Cabal.PackageId -> String
-showPackageId = render . pretty
-
-subdirToDirname :: ConfSubdir -> FilePath
-subdirToDirname subdir =
-    case subdir of
-        GHCConfs    -> "package.conf.d"
-        GentooConfs -> "gentoo"
 
 tryMaybe     :: (a -> Maybe b) -> a -> Either a b
 tryMaybe f a = maybe (Left a) Right $ f a

@@ -12,8 +12,8 @@
 
 module Output (
                 MonadSay(..)
-              , SayM
-              , runSayM
+              , SayT
+              , runSayT
               , sayIO
               , vsayIO
               , pkgListPrintLn
@@ -40,12 +40,12 @@ class Monad m => MonadSay m where
     vsay :: String -> m () -- ^ Say something only when 'Verbose' is selected
 
 -- | A simpler 'MonadSay' when we don't want to set up the full environment yet
-type SayM = ReaderT Verbosity IO
+type SayT = ReaderT Verbosity
 
-runSayM :: Verbosity -> SayM a -> IO a
-runSayM v r = runReaderT r v
+runSayT :: Verbosity -> SayT m a -> m a
+runSayT v r = runReaderT r v
 
-instance MonadSay SayM where
+instance MonadIO m => MonadSay (SayT m) where
     say s = do
         v <- ask
         liftIO $ sayIO v s

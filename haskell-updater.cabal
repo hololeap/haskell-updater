@@ -44,7 +44,7 @@ flag pedantic
   manual:      True
 
 common all
-  ghc-options: -Wall
+  ghc-options: -Wall -Wunused-packages
 
   if flag(pedantic)
     ghc-options: -Werror

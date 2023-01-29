@@ -49,21 +49,12 @@ common all
   if flag(pedantic)
     ghc-options: -Werror
 
-executable haskell-updater
+library haskell-updater-internal
   import:           all
-  hs-source-dirs:   src-exe
-  main-is:          Main.hs
-  other-modules:
-    Distribution.Gentoo.GHC
-    Distribution.Gentoo.Packages
-    Distribution.Gentoo.PkgManager
-    Distribution.Gentoo.Util
-    Output
-    Paths_haskell_updater
-
-  autogen-modules:  Paths_haskell_updater
+  hs-source-dirs:   src
+  default-language: Haskell2010
   build-depends:
-    , base        >=4.12 && <5
+    , base        >=4.12    && <5
     , bytestring
     , Cabal       >=1.8
     , containers
@@ -71,6 +62,26 @@ executable haskell-updater
     , filepath
     , mtl
     , pretty
+    , process
+
+  exposed-modules:
+    Distribution.Gentoo.GHC
+    Distribution.Gentoo.Packages
+    Distribution.Gentoo.PkgManager
+    Distribution.Gentoo.Util
+    Output
+
+executable haskell-updater
+  import:           all
+  hs-source-dirs:   src-exe
+  main-is:          Main.hs
+  other-modules:    Paths_haskell_updater
+  autogen-modules:  Paths_haskell_updater
+  build-depends:
+    , haskell-updater-internal
+    , base        >=4.12    && <5
+    , containers
+    , mtl
     , process
 
   default-language: Haskell2010

@@ -289,7 +289,5 @@ allInstalledPackages = do libDir <- ghcLibDir
 -- Common helper utils, etc.
 -- -----------------------------------------------------------------------------
 
-
-
 tryMaybe     :: (a -> Maybe b) -> a -> Either a b
 tryMaybe f a = maybe (Left a) Right $ f a

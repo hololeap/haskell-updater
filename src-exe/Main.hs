@@ -34,6 +34,7 @@ import Distribution.Gentoo.Env
 import Distribution.Gentoo.GHC
 import Distribution.Gentoo.Packages
 import Distribution.Gentoo.PkgManager
+import Distribution.Gentoo.Util
 import Output
 
 main :: IO ()

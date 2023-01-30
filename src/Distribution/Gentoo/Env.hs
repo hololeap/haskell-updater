@@ -30,12 +30,6 @@ module Distribution.Gentoo.Env
     , GhcConfMap(..)
     , GhcConfFiles(..)
     , GentooConfMap(..)
-      -- * Utilities
-    , ghcPkgRawOut
-    , ghcRawOut
-    , ghcLibDir
-    , ghcLoc
-    , showPackageId
     ) where
 
 import Control.Monad.Reader
@@ -48,26 +42,20 @@ import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
-import System.Directory( canonicalizePath
-                       , doesDirectoryExist
-                       , findExecutable
+import System.Directory( doesDirectoryExist
                        , listDirectory )
 import System.FilePath((</>), takeExtension)
-import Text.PrettyPrint (render)
-import System.Process (readProcess)
 
 import qualified Distribution.InstalledPackageInfo as Cabal
     ( InstalledPackageInfo(..)
     , parseInstalledPackageInfo
     )
-import Distribution.Pretty (Pretty(..))
-import Distribution.Simple.Utils (die')
 import qualified Distribution.Types.PackageId as Cabal
     ( PackageId
     -- , PackageIdentifier(..)
     )
-import qualified Distribution.Verbosity as V
 
+import Distribution.Gentoo.Util
 import Output
 
 
@@ -267,48 +255,8 @@ listConfFiles subdir = liftIO $ do
 -- Utilities
 -- -----------------------------------------------------------------------------
 
--- The directory where GHC has all its libraries, etc.
-ghcLibDir :: MonadIO m => m FilePath
-ghcLibDir = liftIO . canonicalizePath =<< ghcRawOut ["--print-libdir"]
-
 subdirToDirname :: ConfSubdir -> FilePath
 subdirToDirname subdir =
     case subdir of
         GHCConfs    -> "package.conf.d"
         GentooConfs -> "gentoo"
-
-ghcLoc :: MonadIO m => m FilePath
-ghcLoc = findExe "ghc"
-
-ghcPkgLoc :: MonadIO m => m FilePath
-ghcPkgLoc = findExe "ghc-pkg"
-
-ghcPkgRawOut :: MonadIO m => [String] -> m String
-ghcPkgRawOut args = ghcPkgLoc >>= flip rawCommand args
-
--- | Find an executable in $PATH. If it doesn't exist, 'die'' with an
---   error.
-findExe
-    :: MonadIO m
-    => String -- ^ The executable to search for
-    -> m FilePath
-findExe exe = liftIO $ findExecutable exe >>= \case
-    Just e  -> pure e
-    Nothing -> die' V.normal $
-        "Could not find '" ++ show exe ++ "' executable on system"
-
--- Get only the first line of output
-rawSysStdOutLine :: MonadIO m => FilePath -> [String] -> m String
-rawSysStdOutLine app = fmap (head . lines) . rawCommand app
-
--- | Run a command and return its stdout
-rawCommand :: MonadIO m => FilePath -> [String] -> m String
-rawCommand cmd args = liftIO $ readProcess cmd args ""
-
--- Get the first line of output from calling GHC with the given
--- arguments.
-ghcRawOut :: MonadIO m => [String] -> m String
-ghcRawOut args = ghcLoc >>= flip rawSysStdOutLine args
-
-showPackageId :: Cabal.PackageId -> String
-showPackageId = render . pretty

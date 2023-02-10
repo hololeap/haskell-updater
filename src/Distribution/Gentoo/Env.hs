@@ -2,9 +2,6 @@
 {-# LANGUAGE DeriveTraversable #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE IncoherentInstances #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE TypeSynonymInstances #-}
 
 
 module Distribution.Gentoo.Env
@@ -30,6 +27,8 @@ module Distribution.Gentoo.Env
     , GhcConfMap(..)
     , GhcConfFiles(..)
     , GentooConfMap(..)
+    , ghcLibDir
+      -- * Portage-specific environment
     ) where
 
 import Control.Monad.Reader
@@ -38,12 +37,15 @@ import qualified Data.ByteString.Char8 as BS
 
 import qualified Data.Map.Strict as Map
 import Data.Functor.Identity(Identity(..))
+import Data.Maybe (listToMaybe)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
 import System.Directory( doesDirectoryExist
-                       , listDirectory )
+                       , listDirectory
+                       , canonicalizePath
+                       )
 import System.FilePath((</>), takeExtension)
 
 import qualified Distribution.InstalledPackageInfo as Cabal
@@ -58,6 +60,9 @@ import qualified Distribution.Types.PackageId as Cabal
 import Distribution.Gentoo.Util
 import Output
 
+-- -----------------------------------------------------------------------------
+-- GHC-specific environment
+-- -----------------------------------------------------------------------------
 
 -- | Metadata for a @.conf@ file in one of the GHC package databases
 data CabalPkg
@@ -84,22 +89,38 @@ data ConfSubdir = GHCConfs -- ^ GHC's database
 type ConfMap = Map.Map Cabal.PackageId (Set CabalPkg)
 
 -- | The 'ConfMap' from GHC's package index
-newtype GhcConfMap
-    = GhcConfMap { getGhcConfMap :: ConfMap }
+newtype GhcConfMap = GhcConfMap
+    { getGhcConfMap :: ConfMap }
     deriving (Show, Eq, Ord, Semigroup, Monoid)
 
 -- | All @.conf@ files from GHC's package index
 --
 --   Needed for 'getOrphanBroken'
-newtype GhcConfFiles
-    = GhcConfFiles { getGhcConfFiles :: Set FilePath }
+newtype GhcConfFiles = GhcConfFiles
+    { getGhcConfFiles :: Set FilePath }
     deriving (Show, Eq, Ord, Semigroup, Monoid)
 
 -- | The 'ConfMap' from the special Gentoo package index
-newtype GentooConfMap
-    = GentooConfMap { getGentooConfMap :: ConfMap }
+newtype GentooConfMap = GentooConfMap
+    { getGentooConfMap :: ConfMap }
     deriving (Show, Eq, Ord, Semigroup, Monoid)
 
+-- | The directory where GHC has all its libraries, etc.
+ghcLibDir :: MonadIO m => m FilePath
+ghcLibDir = liftIO $ do
+    let args = ["--print-libdir"]
+    ghc <- findExe "ghc"
+    out <- readProcessOrDie ghc args
+    case listToMaybe (lines out) of
+        Just p  -> canonicalizePath p
+        Nothing -> die' $ unwords $
+            ["No output from:", ghc] ++ map show args
+
+-- -----------------------------------------------------------------------------
+-- Portage-specific environment
+-- -----------------------------------------------------------------------------
+
+-- type PortageMap =
 
 -- -----------------------------------------------------------------------------
 -- Environment monad
@@ -108,7 +129,11 @@ newtype GentooConfMap
 -- | All data which is needed for @haskell-updater@ calculations. Ideally, this
 --   will be gathered initially and will be cached in memory, although this may
 --   need to be tweaked if the memory footprint gets out of hand.
-type Env = (GhcConfMap, GhcConfFiles, GentooConfMap)
+data Env = Env
+    { envGhcConfMap :: GhcConfMap
+    , envGhcConfFiles :: GhcConfFiles
+    , envGentooConfMap :: GentooConfMap
+    } deriving (Show, Eq, Ord)
 
 -- | Simply holds the 'Verbosity' (retrieved from the command line options) and
 --   the environment.
@@ -163,16 +188,16 @@ runEnvId :: Verbosity -> Env -> EnvId a -> a
 runEnvId v e = runIdentity . runEnvT v e
 
 class Monad m => MonadEnv m where
+    askVerbosity :: m Verbosity
     askGhcConfMap :: m GhcConfMap
     askGhcConfFiles :: m GhcConfFiles
     askGentooConfMap :: m GentooConfMap
-    askVerbosity :: m Verbosity
 
 instance Monad m => MonadEnv (EnvT m) where
-    askGhcConfMap = asks (\(_,(m,_,_)) -> m)
-    askGhcConfFiles = asks (\(_,(_,s,_)) -> s)
-    askGentooConfMap = asks (\(_,(_,_,m)) -> m)
     askVerbosity = asks fst
+    askGhcConfMap = asks $ envGhcConfMap . snd
+    askGhcConfFiles = asks $ envGhcConfFiles . snd
+    askGentooConfMap = asks $ envGentooConfMap . snd
 
 -- -----------------------------------------------------------------------------
 -- Collecting environment
@@ -191,11 +216,10 @@ collectEnv v = runSayT v $ do
     gentooMap <- foldConf gentooConfs
     vsay $ "got " ++ show (Map.size gentooMap) ++ " '*.conf' files"
 
-    pure
-        ( GhcConfMap ghcMap
-        , GhcConfFiles ghcConfs
-        , GentooConfMap gentooMap
-        )
+    pure $ Env
+            (GhcConfMap ghcMap)
+            (GhcConfFiles ghcConfs)
+            (GentooConfMap gentooMap)
 
 -- -----------------------------------------------------------------------------
 -- Collecting GHC-specific environment
@@ -235,7 +259,7 @@ addConf cmp conf = do
                         return cmp
 
 pushConf :: ConfMap -> Cabal.PackageId -> FilePath -> Cabal.InstalledPackageInfo -> ConfMap
-pushConf m k p ipi = Map.insertWith (Set.union) k (Set.singleton (CabalPkg p ipi)) m
+pushConf m k p ipi = Map.insertWith Set.union k (Set.singleton (CabalPkg p ipi)) m
 
 -- Return the Gentoo .conf files found in this GHC libdir
 listConfFiles :: MonadIO m => ConfSubdir -> m (Set FilePath)
@@ -260,3 +284,5 @@ subdirToDirname subdir =
     case subdir of
         GHCConfs    -> "package.conf.d"
         GentooConfs -> "gentoo"
+
+

@@ -334,7 +334,7 @@ systemInfo rm t = do
     ver    <- ghcVersion
     pName  <- liftIO getProgName
     let pVer = showVersion Paths.version
-    pLoc   <- ghcLoc
+    pLoc <- findExe "ghc"
     libDir <- ghcLibDir
     say $ "Running " ++ pName ++ "-" ++ pVer ++ " using GHC " ++ ver
     say $ "  * Executable: " ++ pLoc
@@ -373,4 +373,7 @@ emptyElse _ f as = f as
 
 -- The version of GHC installed.
 ghcVersion :: MonadIO m => m String
-ghcVersion = dropWhile (not . isDigit) <$> ghcRawOut ["--version"]
+ghcVersion = do
+    ghc <- findExe "ghc"
+    dropWhile (not . isDigit)
+        <$> readProcessOrDie ghc ["--version"]

@@ -10,10 +10,6 @@
 
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE IncoherentInstances #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE TypeSynonymInstances #-}
 
 module Distribution.Gentoo.GHC
        (
@@ -24,15 +20,17 @@ module Distribution.Gentoo.GHC
        , allInstalledPackages
        ) where
 
+import Control.Monad.Reader
 import qualified Data.ByteString.Char8 as BS
 import Data.Char(isDigit)
-import Data.Either (rights)
+import qualified Data.List.NonEmpty as NE
 import Data.Maybe (catMaybes, isJust)
 import qualified Data.Map.Strict as Map
 import           Data.Set (Set)
 import qualified Data.Set as Set
+import System.Exit (ExitCode(..))
 import System.FilePath((</>), pathSeparator)
-import Control.Monad.Reader
+import System.Process (readProcessWithExitCode)
 
 -- Cabal imports
 import qualified Distribution.InstalledPackageInfo as Cabal
@@ -99,49 +97,50 @@ checkPkgs brokenConfs = do
 
 -- | .conf files from broken packages of this GHC version
 -- Returns two lists:
--- * @['Cabal.PackageId']@ - list of broken cabal packages we could not resolve
---                           to Gentoo's .conf files
--- * @['FilePath']@ - list of '.conf' files resolved from broken
---                    PackageId reported by 'ghc-pkg check'
+-- * @'Set' 'Cabal.PackageId'@ - set of broken cabal packages we could not resolve
+--                               to Gentoo's .conf files
+-- * @'Set' 'FilePath'@ - set of '.conf' files resolved from broken
+--                        PackageId reported by 'ghc-pkg check'
 findBrokenConfs :: (MonadEnv m, MonadSay m, MonadIO m) => m (Set Cabal.PackageId, Set FilePath)
-findBrokenConfs =
-    do GentooConfMap cnfs <- askGentooConfMap
-       vsay "brokenConfs: getting broken output from 'ghc-pkg'"
-       ghc_pkg_brokens <- getBrokenGhcPkg
-       vsay $ unwords ["brokenConfs: resolving Cabal package names to gentoo equivalents."
-                      , show (length ghc_pkg_brokens)
-                      , "Cabal packages are broken:"
-                      , unwords $ showPackageId <$> Set.toList ghc_pkg_brokens
-                      ]
+findBrokenConfs = do
+    GentooConfMap cnfs <- askGentooConfMap
+    vsay "brokenConfs: getting broken output from 'ghc-pkg'"
+    ghc_pkg_brokens <- getBrokenGhcPkg
+    vsay $ unwords $
+        ["brokenConfs: resolving Cabal package names to gentoo equivalents."
+        , show (length ghc_pkg_brokens)
+        , "Cabal packages are broken:"
+        ] ++ (showPackageId <$> Set.toList ghc_pkg_brokens)
 
-       (orphan_broken, orphan_confs) <- getOrphanBroken
-       vsay $ unwords [ "brokenConfs: ghc .conf orphans:"
-                      , show (length orphan_broken)
-                      , "are orphan:"
-                      , unwords $ showPackageId <$> Set.toList orphan_broken
-                      ]
+    (orphan_broken, orphan_confs) <- getOrphanBroken
+    vsay $ unwords $
+        [ "brokenConfs: ghc .conf orphans:"
+        , show (length orphan_broken)
+        , "are orphan:"
+        ] ++ (showPackageId <$> Set.toList orphan_broken)
 
-       installed_but_not_registered <- getNotRegistered
-       vsay $ unwords [ "brokenConfs: ghc .conf not registered:"
-                      , show (length installed_but_not_registered)
-                      , "are not registered:"
-                      , unwords $ showPackageId <$> Set.toList installed_but_not_registered
-                      ]
+    installed_but_not_registered <- getNotRegistered
+    vsay $ unwords $
+        [ "brokenConfs: ghc .conf not registered:"
+        , show (length installed_but_not_registered)
+        , "are not registered:"
+        ] ++ (showPackageId <$> Set.toList installed_but_not_registered)
 
-       registered_twice <- getRegisteredTwice
-       vsay $ unwords [ "brokenConfs: ghc .conf registered twice:"
-                      , show (length registered_twice)
-                      , "are registered twice:"
-                      , unwords $ showPackageId <$> Set.toList registered_twice
-                      ]
+    registered_twice <- getRegisteredTwice
+    vsay $ unwords $
+        [ "brokenConfs: ghc .conf registered twice:"
+        , show (length registered_twice)
+        , "are registered twice:"
+        ] ++ (showPackageId <$> Set.toList registered_twice)
 
-       let all_broken = Set.unions [ ghc_pkg_brokens
-                                   , orphan_broken
-                                   , installed_but_not_registered
-                                   , registered_twice
-                                   ]
-       let (known_broken, orphans) = partitionEithers $ Set.map (matchConf cnfs) all_broken
-       return (known_broken, orphan_confs <> Set.map cabalConfPath orphans)
+    let all_broken = Set.unions
+            [ ghc_pkg_brokens
+            , orphan_broken
+            , installed_but_not_registered
+            , registered_twice
+            ]
+    let (known_broken, orphans) = partitionEithers $ Set.map (matchConf cnfs) all_broken
+    return (known_broken, orphan_confs <> Set.map cabalConfPath orphans)
   where
     partitionEithers :: (Ord a, Ord b) => Set (Either a (Set b)) -> (Set a, Set b)
     partitionEithers = Set.foldr'
@@ -151,12 +150,21 @@ findBrokenConfs =
         )
         (Set.empty, Set.empty)
 
--- Return the closure of all packages affected by breakage
--- in format of ["name-version", ... ]
+-- | Runs @ghc-pkg check --simple-output@ and parses each broken package as
+--   a 'Cabal.PackageId', returning all of them as a 'Set'.
 getBrokenGhcPkg :: (MonadSay m, MonadIO m) => m (Set Cabal.PackageId)
 getBrokenGhcPkg = do
-    s <- ghcPkgRawOut ["check", "--simple-output"]
-    Set.fromList . catMaybes <$> traverse check (words s)
+    ghcPkg <- findExe "ghc-pkg"
+    -- Use 'readProcessWithExitCode' so it can ignore a non-zero exit code
+    -- (@ghc-pkg@ tends to return these when it finds broken packages).
+    (ec, out, _) <- liftIO
+        $ readProcessWithExitCode ghcPkg ["check", "--simple-output"] ""
+    case ec of
+        -- No output from @ghc-pkg@ when nothing is broken
+        ExitSuccess -> pure mempty
+        ExitFailure _ -> do
+            mIds <- idsFromOutput out >>= traverse check
+            pure $ Set.fromList $ catMaybes mIds
   where
     check :: MonadSay m => String -> m (Maybe Cabal.PackageId)
     check s = do
@@ -165,21 +173,41 @@ getBrokenGhcPkg = do
             say $ unwords ["Unable to parse as PackageId:", show s]
         pure mpid
 
+    -- Grabs the first line of stdout and splits it into words
+    idsFromOutput :: MonadIO m => String -> m [String]
+    idsFromOutput s = case firstLine s of
+        Just l  -> pure $ words l
+        Nothing -> die' $ unlines $ "Could not parse ghc-pkg output:" : [s]
+
 -- | Around Jan 2015 we have started to install
 --   all the .conf files in 'src_install()' phase.
 --   Here we pick orphan ones and notify user about it.
-getOrphanBroken :: (MonadEnv m, MonadIO m) => m (Set Cabal.PackageId, Set FilePath)
+--
+getOrphanBroken
+    :: (MonadEnv m, MonadIO m)
+    => m
+        ( Set Cabal.PackageId -- ^ > brokenConfs: ghc .conf orphans
+        , Set FilePath
+        )
 getOrphanBroken = do
     GhcConfFiles registered_confs <- askGhcConfFiles
     confs_to_pkgs <- liftIO $ resolveFiles registered_confs
     let conf_files = Map.keysSet confs_to_pkgs
         orphan_conf_files = Set.toList $ registered_confs Set.\\ conf_files
-    orphan_packages <- fmap rights $
-        forM orphan_conf_files $ \conf -> do
-            bs <- liftIO $ BS.readFile conf
-            let ipi = Cabal.parseInstalledPackageInfo bs
-            pure $ Cabal.sourcePackageId . snd <$> ipi
+    orphan_packages <- traverse parseConf orphan_conf_files
     return (Set.fromList orphan_packages, Set.fromList orphan_conf_files)
+  where
+    parseConf :: MonadIO m => FilePath -> m Cabal.PackageId
+    parseConf conf = do
+        bs <- liftIO $ BS.readFile conf
+        let ipi = Cabal.parseInstalledPackageInfo bs
+        case Cabal.sourcePackageId . snd <$> ipi of
+            Left es -> die' $ unwords $
+                [ "Error parsing"
+                , show conf
+                , ":"
+                ] ++ NE.toList es
+            Right x -> pure x
 
 -- Return packages, that seem to have
 -- been installed via emerge (have gentoo/.conf entry),
@@ -227,15 +255,15 @@ getRegisteredTwice = do
 -- -----------------------------------------------------------------------------
 
 -- Finding packages installed with other versions of GHC
-oldGhcPkgs :: (MonadSay m, MonadIO m) => m (Set Package)
-oldGhcPkgs =
-    do thisGhc <- ghcLibDir
-       vsay $ "oldGhcPkgs ghc lib: " ++ show thisGhc
-       let thisGhc' = BS.pack thisGhc
-       -- It would be nice to do this, but we can't assume
-       -- some crazy user hasn't deleted one of these dirs
-       -- libFronts' <- filterM doesDirectoryExist libFronts
-       Set.fromList . notGHC <$> checkLibDirs thisGhc' libFronts
+oldGhcPkgs :: (MonadEnv m, MonadSay m, MonadIO m) => m (Set Package)
+oldGhcPkgs = do
+    thisGhc <- ghcLibDir
+    vsay $ "oldGhcPkgs ghc lib: " ++ show thisGhc
+    let thisGhc' = BS.pack thisGhc
+    -- It would be nice to do this, but we can't assume
+    -- some crazy user hasn't deleted one of these dirs
+    -- libFronts' <- filterM doesDirectoryExist libFronts
+    Set.fromList . notGHC <$> checkLibDirs thisGhc' libFronts
 
 -- Find packages installed by other versions of GHC in this possible
 -- library directory.
@@ -279,7 +307,7 @@ libFronts = map BS.pack
 -- Return all installed haskell packages
 -- -----------------------------------------------------------------------------
 
-allInstalledPackages :: MonadIO m => m (Set Package)
+allInstalledPackages :: (MonadEnv m, MonadIO m) => m (Set Package)
 allInstalledPackages = do libDir <- ghcLibDir
                           let libDir' = BS.pack libDir
                           fmap (Set.fromList . notGHC) $ liftIO $ pkgsHaveContent

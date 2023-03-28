@@ -48,8 +48,9 @@ import qualified Distribution.Types.LibraryName as Cabal
 
 -- haskell-updater imports
 import Distribution.Gentoo.Env
-import Distribution.Gentoo.Util
 import Distribution.Gentoo.Packages
+import Distribution.Gentoo.Types
+import Distribution.Gentoo.Util
 import Output
 
 
@@ -68,7 +69,7 @@ matchConf
 matchConf = tryMaybe . flip Map.lookup
 
 -- -----------------------------------------------------------------------------
--- Checking for broken backages
+-- Checking for broken packages
 -- -----------------------------------------------------------------------------
 
 -- | Finding broken packages in this install of GHC.

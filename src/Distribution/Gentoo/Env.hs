@@ -37,14 +37,12 @@ import qualified Data.ByteString.Char8 as BS
 
 import qualified Data.Map.Strict as Map
 import Data.Functor.Identity(Identity(..))
-import Data.Maybe (listToMaybe)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
 import System.Directory( doesDirectoryExist
                        , listDirectory
-                       , canonicalizePath
                        )
 import System.FilePath((</>), takeExtension)
 
@@ -57,70 +55,10 @@ import qualified Distribution.Types.PackageId as Cabal
     -- , PackageIdentifier(..)
     )
 
+import Distribution.Gentoo.Types
 import Distribution.Gentoo.Util
 import Output
 
--- -----------------------------------------------------------------------------
--- GHC-specific environment
--- -----------------------------------------------------------------------------
-
--- | Metadata for a @.conf@ file in one of the GHC package databases
-data CabalPkg
-    = CabalPkg
-    {
-      -- | Location of @.conf@ file
-      cabalConfPath :: FilePath
-      -- | Contents gathered by 'parseInstalledPackageInfo'
-    , cabalConfInfo :: Cabal.InstalledPackageInfo -- ^ Parsed contents
-    }
-    deriving (Show, Eq)
-
--- | Cannot derive automatically, as 'Cabal.InstalledPackageInfo' does not have
---   an 'Ord' instance. Compares on the 'FilePath' only.
-instance Ord CabalPkg where
-    CabalPkg fp1 _ `compare` CabalPkg fp2 _ = fp1 `compare` fp2
-
--- | Differentiates between the package database used by GHC and the special
---   package database used to assist @haskell-updater@.
-data ConfSubdir = GHCConfs -- ^ GHC's database
-                | GentooConfs -- ^ assists @haskell-updater@
-
--- | Unique (normal) or multiple (broken) mapping
-type ConfMap = Map.Map Cabal.PackageId (Set CabalPkg)
-
--- | The 'ConfMap' from GHC's package index
-newtype GhcConfMap = GhcConfMap
-    { getGhcConfMap :: ConfMap }
-    deriving (Show, Eq, Ord, Semigroup, Monoid)
-
--- | All @.conf@ files from GHC's package index
---
---   Needed for 'getOrphanBroken'
-newtype GhcConfFiles = GhcConfFiles
-    { getGhcConfFiles :: Set FilePath }
-    deriving (Show, Eq, Ord, Semigroup, Monoid)
-
--- | The 'ConfMap' from the special Gentoo package index
-newtype GentooConfMap = GentooConfMap
-    { getGentooConfMap :: ConfMap }
-    deriving (Show, Eq, Ord, Semigroup, Monoid)
-
--- | The directory where GHC has all its libraries, etc.
-ghcLibDir :: MonadIO m => m FilePath
-ghcLibDir = liftIO $ do
-    let args = ["--print-libdir"]
-    ghc <- findExe "ghc"
-    out <- readProcessOrDie ghc args
-    case listToMaybe (lines out) of
-        Just p  -> canonicalizePath p
-        Nothing -> die' $ unwords $
-            ["No output from:", ghc] ++ map show args
-
--- -----------------------------------------------------------------------------
--- Portage-specific environment
--- -----------------------------------------------------------------------------
-
--- type PortageMap =
 
 -- -----------------------------------------------------------------------------
 -- Environment monad

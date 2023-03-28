@@ -61,6 +61,7 @@ library haskell-updater-internal
     , directory   >=1.2.5.0
     , filepath
     , mtl
+    , parsec
     , pretty
     , process
 

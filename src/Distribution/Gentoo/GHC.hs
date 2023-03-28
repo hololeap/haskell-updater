@@ -22,15 +22,18 @@ module Distribution.Gentoo.GHC
 
 import Control.Monad.Reader
 import qualified Data.ByteString.Char8 as BS
-import Data.Char(isDigit)
+import Data.Char (isDigit)
+import qualified Data.List as L
 import qualified Data.List.NonEmpty as NE
 import Data.Maybe (catMaybes, isJust)
 import qualified Data.Map.Strict as Map
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import System.Exit (ExitCode(..))
-import System.FilePath((</>), pathSeparator)
+import System.FilePath(pathSeparator)
 import System.Process (readProcessWithExitCode)
+import Text.Parsec
+import Text.Parsec.String
 
 -- Cabal imports
 import qualified Distribution.InstalledPackageInfo as Cabal
@@ -49,11 +52,9 @@ import qualified Distribution.Types.LibraryName as Cabal
 -- haskell-updater imports
 import Distribution.Gentoo.Env
 import Distribution.Gentoo.Packages
-import Distribution.Gentoo.Types
+-- import Distribution.Gentoo.Types
 import Distribution.Gentoo.Util
 import Output
-
-
 
 -- -----------------------------------------------------------------------------
 -- ConfMap manipulation
@@ -260,16 +261,15 @@ oldGhcPkgs :: (MonadEnv m, MonadSay m, MonadIO m) => m (Set Package)
 oldGhcPkgs = do
     thisGhc <- ghcLibDir
     vsay $ "oldGhcPkgs ghc lib: " ++ show thisGhc
-    let thisGhc' = BS.pack thisGhc
     -- It would be nice to do this, but we can't assume
     -- some crazy user hasn't deleted one of these dirs
     -- libFronts' <- filterM doesDirectoryExist libFronts
-    Set.fromList . notGHC <$> checkLibDirs thisGhc' libFronts
+    Set.fromList . notGHC <$> checkLibDirs thisGhc libFronts
 
 -- Find packages installed by other versions of GHC in this possible
 -- library directory.
 checkLibDirs :: (MonadSay m, MonadIO m)
-    => BSFilePath -> [BSFilePath] -> m [Package]
+    => FilePath -> [FilePath] -> m [Package]
 checkLibDirs thisGhc libDirs =
     do vsay $ "checkLibDir ghc libs: " ++ show (thisGhc, libDirs)
        liftIO $ pkgsHaveContent (hasDirMatching wanted)
@@ -279,40 +279,34 @@ checkLibDirs thisGhc libDirs =
     isValid dir = any (`isGhcLibDir` dir) libDirs
 
     -- Invalid if it's this GHC
-    isInvalid fp = fp == thisGhc || BS.isPrefixOf (thisGhc `BS.snoc` pathSeparator) fp
+    isInvalid fp = fp == thisGhc || L.isPrefixOf (thisGhc ++ [pathSeparator]) fp
 
 -- A valid GHC library directory starting at libdir has a name of
 -- "ghc", then a hyphen and then a version number.
-isGhcLibDir :: BSFilePath -> BSFilePath -> Bool
-isGhcLibDir libdir dir = go ghcDirName
+isGhcLibDir :: FilePath -> FilePath -> Bool
+isGhcLibDir libdir dir = case parse parser "" dir of
+    Left _ -> False
+    Right _ -> True
   where
-    -- This is hacky because FilePath doesn't work on Bytestrings...
-    libdir' = BS.snoc libdir pathSeparator
-    ghcDirName = BS.pack "ghc"
+    -- The parser just needs to check for validity, not return anything
+    parser :: Parser ()
+    parser = do
+        _ <- string libdir
+        _ <- char pathSeparator
+        _ <- string "ghc-"
+        _ <- satisfy isDigit
+        pure ()
 
-    go dn = BS.isPrefixOf ghcDir dir
-            -- Any possible version starts with a digit
-            && isDigit (BS.index dir ghcDirLen)
-      where
-        ghcDir = flip BS.snoc '-' $ BS.append libdir' dn
-        ghcDirLen = BS.length ghcDir
-
-
--- The possible places GHC could have installed lib directories
-libFronts :: [BSFilePath]
-libFronts = map BS.pack
-            $ do lib <- ["lib", "lib64"]
-                 return $ "/" </> "usr" </> lib
 
 -- -----------------------------------------------------------------------------
 -- Return all installed haskell packages
 -- -----------------------------------------------------------------------------
 
 allInstalledPackages :: (MonadEnv m, MonadIO m) => m (Set Package)
-allInstalledPackages = do libDir <- ghcLibDir
-                          let libDir' = BS.pack libDir
-                          fmap (Set.fromList . notGHC) $ liftIO $ pkgsHaveContent
-                                       $ hasDirMatching (==libDir')
+allInstalledPackages = do
+    libDir <- ghcLibDir
+    fmap (Set.fromList . notGHC) $ liftIO $ pkgsHaveContent
+        $ hasDirMatching (==libDir)
 
 -- -----------------------------------------------------------------------------
 -- Common helper utils, etc.

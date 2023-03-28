@@ -10,9 +10,9 @@
 -}
 
 module Distribution.Gentoo.Types
-    ( BSFilePath
+    (
       -- * Portage
-    , Category
+      Category
     , Pkg
     , VerPkg
     , VCatPkg
@@ -29,7 +29,6 @@ module Distribution.Gentoo.Types
     , GentooConfMap (..)
     ) where
 
-import Data.ByteString.Char8 (ByteString)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
@@ -38,8 +37,6 @@ import qualified Distribution.InstalledPackageInfo as Cabal
 import qualified Distribution.Types.PackageId as Cabal
     (PackageId)
 
--- Alias used to indicate that this ByteString represents a FilePath
-type BSFilePath = ByteString
 
 -- -----------------------------------------------------------------------------
 -- Portage-specific environment
@@ -56,12 +53,12 @@ type Slot = String
 
 -- | When we are (re-)building packages, we don't care about the
 --   version, just the slot.
-data Package = Package Category Pkg (Maybe Slot)
+data Package = Package Category Pkg Slot
              deriving(Eq, Ord, Show, Read)
 
 -- | Representation of individual lines in a @CONTENTS@ file.
-data Content = Dir BSFilePath
-             | Obj BSFilePath
+data Content = Dir FilePath
+             | Obj FilePath
                deriving (Eq, Show, Ord)
 
 -- -----------------------------------------------------------------------------

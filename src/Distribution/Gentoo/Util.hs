@@ -1,3 +1,10 @@
+
+-- These extensions are for ParseException
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
 {- |
    Module      : Distribution.Gentoo.Util
    Description : Utility functions
@@ -8,7 +15,9 @@
  -}
 
 module Distribution.Gentoo.Util
-       ( concatMapM
+       ( ParseException (..)
+       , throwParseError
+       , concatMapM
        , breakAll
        , showPackageId
        , rawSysStdOutLine
@@ -20,12 +29,15 @@ module Distribution.Gentoo.Util
        , ghcLibDir
        ) where
 
+import Control.Exception (Exception (..), throwIO)
 import Control.Monad.IO.Class
 import qualified Data.List as L
 import Data.Maybe (listToMaybe)
+import Data.Typeable (Typeable)
 import System.Directory (findExecutable, canonicalizePath)
-import System.Exit (ExitCode(..))
+import System.Exit (ExitCode (..))
 import System.Process (readProcess, readProcessWithExitCode)
+import Text.Parsec.Error (ParseError)
 import Text.PrettyPrint (render)
 
 import Distribution.Pretty (Pretty(..))
@@ -35,6 +47,15 @@ import qualified Distribution.Types.PackageId as Cabal
     )
 import qualified Distribution.Simple.Utils as Cabal (die')
 import qualified Distribution.Verbosity as V
+
+-- | Wrapper to give 'ParseError' an 'Exception' instance
+newtype ParseException = ParseException ParseError
+    deriving stock Typeable
+    deriving newtype Show
+    deriving anyclass Exception
+
+throwParseError :: MonadIO m => ParseError -> m a
+throwParseError = liftIO . throwIO . ParseException
 
 concatMapM :: Applicative f => (a -> f [b]) -> [a] -> f [b]
 concatMapM f = fmap concat . traverse f

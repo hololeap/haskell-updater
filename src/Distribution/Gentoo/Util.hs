@@ -8,8 +8,7 @@
  -}
 
 module Distribution.Gentoo.Util
-       ( BSFilePath
-       , concatMapM
+       ( concatMapM
        , breakAll
        , showPackageId
        , rawSysStdOutLine
@@ -18,13 +17,13 @@ module Distribution.Gentoo.Util
        , readProcessOrDie
        , firstLine
        , die'
+       , ghcLibDir
        ) where
 
 import Control.Monad.IO.Class
 import qualified Data.List as L
-import Data.ByteString.Char8(ByteString)
 import Data.Maybe (listToMaybe)
-import System.Directory (findExecutable)
+import System.Directory (findExecutable, canonicalizePath)
 import System.Exit (ExitCode(..))
 import System.Process (readProcess, readProcessWithExitCode)
 import Text.PrettyPrint (render)
@@ -36,9 +35,6 @@ import qualified Distribution.Types.PackageId as Cabal
     )
 import qualified Distribution.Simple.Utils as Cabal (die')
 import qualified Distribution.Verbosity as V
-
--- Alias used to indicate that this ByteString represents a FilePath
-type BSFilePath = ByteString
 
 concatMapM :: Applicative f => (a -> f [b]) -> [a] -> f [b]
 concatMapM f = fmap concat . traverse f
@@ -101,3 +97,14 @@ firstLine = listToMaybe . lines
 --   command-line.
 die' :: MonadIO m => String -> m a
 die' = liftIO . Cabal.die' V.normal
+
+-- | The directory where GHC has all its libraries, etc.
+ghcLibDir :: MonadIO m => m FilePath
+ghcLibDir = liftIO $ do
+    let args = ["--print-libdir"]
+    ghc <- findExe "ghc"
+    out <- readProcessOrDie ghc args
+    case listToMaybe (lines out) of
+        Just p  -> canonicalizePath p
+        Nothing -> die' $ unwords $
+            ["No output from:", ghc] ++ map show args

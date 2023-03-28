@@ -69,6 +69,7 @@ library haskell-updater-internal
     Distribution.Gentoo.GHC
     Distribution.Gentoo.Packages
     Distribution.Gentoo.PkgManager
+    Distribution.Gentoo.Types
     Distribution.Gentoo.Util
     Output
 

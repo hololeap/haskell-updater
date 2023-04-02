@@ -52,7 +52,7 @@ import qualified Distribution.Types.LibraryName as Cabal
 -- haskell-updater imports
 import Distribution.Gentoo.Env
 import Distribution.Gentoo.Packages
--- import Distribution.Gentoo.Types
+import Distribution.Gentoo.Types
 import Distribution.Gentoo.Util
 import Output
 
@@ -67,7 +67,7 @@ matchConf
     :: ConfMap
     -> Cabal.PackageId
     -> Either Cabal.PackageId (Set CabalPkg)
-matchConf = tryMaybe . flip Map.lookup
+matchConf = tryMaybe . flip Map.lookup . unMonoidMap
 
 -- -----------------------------------------------------------------------------
 -- Checking for broken packages
@@ -83,19 +83,21 @@ brokenPkgs = do
     pure (pkgs, pns, orphanGentooFiles)
 
 -- | Returns: broken, unknown_files
-checkPkgs :: (MonadSay m, MonadIO m)
+checkPkgs :: (MonadEnv m, MonadSay m)
     => Set FilePath -> m (Set Package, Set FilePath)
 checkPkgs brokenConfs = do
-       files_to_pkgs <- liftIO $ resolveFiles brokenConfs
-       let gentooFiles = Map.keysSet files_to_pkgs
-           pkgs = Set.fromList $ Map.elems files_to_pkgs
-           orphanGentooFiles = brokenConfs Set.\\ gentooFiles
-       vsay $ unwords [ "checkPkgs: searching for gentoo .conf orphans"
-                      , show (length orphanGentooFiles)
-                      , "of"
-                      , show (length brokenConfs)
-                      ]
-       return (pkgs, orphanGentooFiles)
+    vMappings <- askVersionMappings
+    cMappings <- askContentMappings
+    let MonoidMap filesToPkgs = resolveFiles vMappings cMappings brokenConfs
+        gentooFiles = Map.keysSet filesToPkgs
+        pkgs = Set.unions $ Map.elems filesToPkgs
+        orphanGentooFiles = brokenConfs Set.\\ gentooFiles
+    vsay $ unwords [ "checkPkgs: searching for gentoo .conf orphans"
+                    , show (length orphanGentooFiles)
+                    , "of"
+                    , show (length brokenConfs)
+                    ]
+    return (pkgs, orphanGentooFiles)
 
 -- | .conf files from broken packages of this GHC version
 -- Returns two lists:
@@ -192,10 +194,12 @@ getOrphanBroken
         , Set FilePath
         )
 getOrphanBroken = do
-    GhcConfFiles registered_confs <- askGhcConfFiles
-    confs_to_pkgs <- liftIO $ resolveFiles registered_confs
-    let conf_files = Map.keysSet confs_to_pkgs
-        orphan_conf_files = Set.toList $ registered_confs Set.\\ conf_files
+    GhcConfFiles registeredConfs <- askGhcConfFiles
+    vMappings <- askVersionMappings
+    cMappings <- askContentMappings
+    let MonoidMap confsToPkgs = resolveFiles vMappings cMappings registeredConfs
+        conf_files = Map.keysSet confsToPkgs
+        orphan_conf_files = Set.toList $ registeredConfs Set.\\ conf_files
     orphan_packages <- traverse parseConf orphan_conf_files
     return (Set.fromList orphan_packages, Set.fromList orphan_conf_files)
   where
@@ -218,9 +222,9 @@ getOrphanBroken = do
 -- due to unregistration bugs in old eclass.
 getNotRegistered :: MonadEnv m => m (Set Cabal.PackageId)
 getNotRegistered = do
-    GentooConfMap installed_confs  <- askGentooConfMap
-    GhcConfMap    registered_confs <- askGhcConfMap
-    return $ Map.keysSet installed_confs Set.\\ Map.keysSet registered_confs
+    GentooConfMap (MonoidMap installedConfs)  <- askGentooConfMap
+    GhcConfMap    (MonoidMap registeredConfs) <- askGhcConfMap
+    return $ Map.keysSet installedConfs Set.\\ Map.keysSet registeredConfs
 
 -- Return packages, that seem to have
 -- been installed more, than once.
@@ -234,8 +238,8 @@ getNotRegistered = do
 -- It's is easy to fix just by reinstalling transformers.
 getRegisteredTwice :: MonadEnv m => m (Set Cabal.PackageId)
 getRegisteredTwice = do
-    GhcConfMap registered_confs <- askGhcConfMap
-    let registered_twice = Map.filter filt registered_confs
+    GhcConfMap (MonoidMap registeredConfs) <- askGhcConfMap
+    let registered_twice = Map.filter filt registeredConfs
     return $ Map.keysSet registered_twice
   where
     filt :: Set CabalPkg -> Bool
@@ -257,22 +261,24 @@ getRegisteredTwice = do
 -- -----------------------------------------------------------------------------
 
 -- Finding packages installed with other versions of GHC
-oldGhcPkgs :: (MonadEnv m, MonadSay m, MonadIO m) => m (Set Package)
+oldGhcPkgs :: (MonadEnv m, MonadSay m) => m (Set Package)
 oldGhcPkgs = do
-    thisGhc <- ghcLibDir
+    thisGhc <- askGhcLibDir
     vsay $ "oldGhcPkgs ghc lib: " ++ show thisGhc
     -- It would be nice to do this, but we can't assume
     -- some crazy user hasn't deleted one of these dirs
     -- libFronts' <- filterM doesDirectoryExist libFronts
-    Set.fromList . notGHC <$> checkLibDirs thisGhc libFronts
+    notGHC <$> checkLibDirs thisGhc libFronts
 
 -- Find packages installed by other versions of GHC in this possible
 -- library directory.
-checkLibDirs :: (MonadSay m, MonadIO m)
-    => FilePath -> [FilePath] -> m [Package]
-checkLibDirs thisGhc libDirs =
-    do vsay $ "checkLibDir ghc libs: " ++ show (thisGhc, libDirs)
-       liftIO $ pkgsHaveContent (hasDirMatching wanted)
+checkLibDirs :: (MonadEnv m, MonadSay m)
+    => GhcLibDir -> [FilePath] -> m (Set Package)
+checkLibDirs (GhcLibDir thisGhc) libDirs = do
+    vMappings <- askVersionMappings
+    cMappings <- askContentMappings
+    vsay $ "checkLibDir ghc libs: " ++ show (thisGhc, libDirs)
+    pure $ pkgsHaveContent vMappings cMappings (hasDirMatching wanted)
   where
     wanted dir = isValid dir && (not . isInvalid) dir
 
@@ -302,11 +308,13 @@ isGhcLibDir libdir dir = case parse parser "" dir of
 -- Return all installed haskell packages
 -- -----------------------------------------------------------------------------
 
-allInstalledPackages :: (MonadEnv m, MonadIO m) => m (Set Package)
+allInstalledPackages :: MonadEnv m => m (Set Package)
 allInstalledPackages = do
-    libDir <- ghcLibDir
-    fmap (Set.fromList . notGHC) $ liftIO $ pkgsHaveContent
-        $ hasDirMatching (==libDir)
+    GhcLibDir libDir <- askGhcLibDir
+    vMappings <- askVersionMappings
+    cMappings <- askContentMappings
+    let pkgs = pkgsHaveContent vMappings cMappings $ hasDirMatching (==libDir)
+    pure $ notGHC pkgs
 
 -- -----------------------------------------------------------------------------
 -- Common helper utils, etc.

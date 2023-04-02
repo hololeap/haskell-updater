@@ -21,6 +21,7 @@ module Output (
               ) where
 
 import Control.Monad.Reader
+import Data.Monoid (Ap (..))
 import System.IO (hPutStrLn, stderr)
 
 import Distribution.Gentoo.Packages
@@ -37,6 +38,10 @@ data Verbosity = Quiet
 class Monad m => MonadSay m where
     say  :: String -> m () -- ^ Say something under normal conditions
     vsay :: String -> m () -- ^ Say something only when 'Verbose' is selected
+
+instance MonadSay m => MonadSay (Ap m) where
+    say = Ap . say
+    vsay = Ap . vsay
 
 -- | A simpler 'MonadSay' when we don't want to set up the full environment yet
 type SayT = ReaderT Verbosity

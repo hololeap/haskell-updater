@@ -3,7 +3,6 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
-
 module Distribution.Gentoo.Env
     (
       -- * Environment monad transformer
@@ -27,8 +26,8 @@ module Distribution.Gentoo.Env
     , GhcConfMap(..)
     , GhcConfFiles(..)
     , GentooConfMap(..)
+      -- * Util
     , ghcLibDir
-      -- * Portage-specific environment
     ) where
 
 import Control.Monad.Reader
@@ -37,12 +36,14 @@ import qualified Data.ByteString.Char8 as BS
 
 import qualified Data.Map.Strict as Map
 import Data.Functor.Identity(Identity(..))
+import Data.Maybe (listToMaybe)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Set (Set)
 import qualified Data.Set as Set
 import System.Directory( doesDirectoryExist
                        , listDirectory
+                       , canonicalizePath
                        )
 import System.FilePath((</>), takeExtension)
 
@@ -55,6 +56,7 @@ import qualified Distribution.Types.PackageId as Cabal
     -- , PackageIdentifier(..)
     )
 
+import Distribution.Gentoo.Packages
 import Distribution.Gentoo.Types
 import Distribution.Gentoo.Util
 import Output
@@ -71,6 +73,10 @@ data Env = Env
     { envGhcConfMap :: GhcConfMap
     , envGhcConfFiles :: GhcConfFiles
     , envGentooConfMap :: GentooConfMap
+    , envGhcLibDir :: GhcLibDir
+    , envVersionMappings :: VersionMappings
+    , envContentMappings :: ContentMappings
+    , envPackageMappings :: PackageMappings
     } deriving (Show, Eq, Ord)
 
 -- | Simply holds the 'Verbosity' (retrieved from the command line options) and
@@ -130,12 +136,20 @@ class Monad m => MonadEnv m where
     askGhcConfMap :: m GhcConfMap
     askGhcConfFiles :: m GhcConfFiles
     askGentooConfMap :: m GentooConfMap
+    askGhcLibDir :: m GhcLibDir
+    askVersionMappings :: m VersionMappings
+    askContentMappings :: m ContentMappings
+    askPackageMappings :: m PackageMappings
 
 instance Monad m => MonadEnv (EnvT m) where
     askVerbosity = asks fst
     askGhcConfMap = asks $ envGhcConfMap . snd
     askGhcConfFiles = asks $ envGhcConfFiles . snd
     askGentooConfMap = asks $ envGentooConfMap . snd
+    askGhcLibDir = asks $ envGhcLibDir . snd
+    askVersionMappings = asks $ envVersionMappings . snd
+    askContentMappings = asks $ envContentMappings . snd
+    askPackageMappings = asks $ envPackageMappings . snd
 
 -- -----------------------------------------------------------------------------
 -- Collecting environment
@@ -144,20 +158,42 @@ instance Monad m => MonadEnv (EnvT m) where
 -- | This is what needs to be run to collect the environment before calculations
 collectEnv :: MonadIO m => Verbosity -> m Env
 collectEnv v = runSayT v $ do
+    libDir@(GhcLibDir d) <- ghcLibDir
+    vsay $ unwords ["GHC lib directory:", d]
+
     vsay "reading '*.conf' files from GHC package database"
-    ghcConfs <- listConfFiles GHCConfs
-    ghcMap  <- foldConf ghcConfs
-    vsay $ "got " ++ show (Map.size ghcMap) ++ " '*.conf' files"
+    ghcConfs <- listConfFiles libDir GHCConfs
+    (ghcMap, ghcCabalPkgMap)  <- foldConf ghcConfs
+    vsay $ unwords
+        ["got", show (Map.size (unMonoidMap ghcMap)), "'*.conf' files"]
 
     vsay "reading '*.conf' files from special Gentoo package database"
-    gentooConfs <- listConfFiles GentooConfs
-    gentooMap <- foldConf gentooConfs
-    vsay $ "got " ++ show (Map.size gentooMap) ++ " '*.conf' files"
+    gentooConfs <- listConfFiles libDir GentooConfs
+    (gentooMap, gentooCabalPkgMap) <- foldConf gentooConfs
+    vsay $ unwords
+        ["got", show (Map.size (unMonoidMap gentooMap)), "'*.conf' files"]
+
+    let cabalPkgMap = ghcCabalPkgMap <> gentooCabalPkgMap
+
+    (vMappings, cMappings, pMappings) <- gatherMappings cabalPkgMap
+
+    vsay "Found the following from /var/db/pkg:"
+    vsay $ unlines $ ("    " ++) . unwords <$>
+        [ [show $ Map.size $ unMonoidMap $ fst vMappings, "package entries"]
+        , [show $ Map.size $ unMonoidMap $ snd vMappings, "package slots"]
+        , [show $ Map.size $ unMonoidMap $ snd cMappings, "content entries"]
+        , [show $ Map.size $ unMonoidMap $ snd pMappings, "haskell packages"]
+        ]
 
     pure $ Env
             (GhcConfMap ghcMap)
             (GhcConfFiles ghcConfs)
             (GentooConfMap gentooMap)
+            libDir
+            vMappings
+            cMappings
+            pMappings
+
 
 -- -----------------------------------------------------------------------------
 -- Collecting GHC-specific environment
@@ -166,43 +202,51 @@ collectEnv v = runSayT v $ do
 -- Fold Gentoo .conf files from the current GHC version and
 -- create a Map
 foldConf :: (MonadSay m, MonadIO m, Foldable t)
-    => t FilePath -> m ConfMap
-foldConf = foldM addConf Map.empty
+    => t FilePath -> m (ConfMap, CabalPkgMap)
+foldConf = getAp . foldMap addConf
 
 -- | Add this .conf file to the Map
-addConf :: (MonadSay m, MonadIO m) => ConfMap -> FilePath -> m ConfMap
-addConf cmp conf = do
-    cont <- liftIO $ BS.readFile conf
+addConf :: (MonadSay m, MonadIO m)
+    => FilePath -> Ap m (ConfMap, CabalPkgMap)
+addConf conf = do
+    cont <- Ap $ liftIO $ BS.readFile conf
     -- empty files are created for
     -- phony packages like CABAL_CORE_LIB_GHC_PV
     -- and binary-only packages.
-    if BS.null cont
-        then return cmp
-        else case Cabal.parseInstalledPackageInfo cont of
-            Right (ws, ipi) -> do
-                let i  = Cabal.sourcePackageId ipi
-                    dn = showPackageId i
-                vsay $ unwords [conf, "resolved:", show dn]
-                unless (null ws) $ do
-                    vsay "    Warnings:"
-                    forM_ ws $ \w -> do
-                        vsay $ "        " ++ w
-                pure $ pushConf cmp i conf ipi
-            Left ne -> do
-                        say $ unwords [ "failed to parse"
-                                      , show conf
-                                      , ":"
-                                      ]
-                        forM_ ne $ \e -> say $ "    " ++ show e
-                        return cmp
+    unlessAp (BS.null cont) $ do
+        let parsedInfo = Cabal.parseInstalledPackageInfo cont
+        exceptAp parsedInfo err $ \(ws, ipi) -> do
+            let i  = Cabal.sourcePackageId ipi
+                dn = showPackageId i
+            vsay $ unwords [conf, "resolved:", show dn]
+            unless (null ws) $ do
+                vsay "    Warnings:"
+                forM_ ws $ \w -> do
+                    vsay $ "        " ++ w
+            pure $ pushConf i conf ipi
+  where
+    unlessAp :: (Applicative m, Monoid a) => Bool -> Ap m a -> Ap m a
+    unlessAp b a = if b then mempty else a
 
-pushConf :: ConfMap -> Cabal.PackageId -> FilePath -> Cabal.InstalledPackageInfo -> ConfMap
-pushConf m k p ipi = Map.insertWith Set.union k (Set.singleton (CabalPkg p ipi)) m
+    exceptAp :: (Applicative m, Monoid b)
+        => Either e a -> (e -> Ap m ()) -> (a -> Ap m b) -> Ap m b
+    exceptAp (Left e) f _ = f e *> mempty
+    exceptAp (Right x) _ f = f x
+
+    err ne = do
+        say $ unwords [ "failed to parse", show conf, ":"]
+        forM_ ne $ \e -> say $ "    " ++ show e
+
+pushConf
+    :: Cabal.PackageId
+    -> FilePath
+    -> Cabal.InstalledPackageInfo
+    -> (ConfMap, CabalPkgMap)
+pushConf k p i = (monoidMap k (CabalPkg p i), monoidMap p k)
 
 -- Return the Gentoo .conf files found in this GHC libdir
-listConfFiles :: MonadIO m => ConfSubdir -> m (Set FilePath)
-listConfFiles subdir = liftIO $ do
-    dir <- ghcLibDir
+listConfFiles :: MonadIO m => GhcLibDir -> ConfSubdir -> m (Set FilePath)
+listConfFiles (GhcLibDir dir) subdir = liftIO $ do
     let gDir = dir </> subdirToDirname subdir
     exists <- doesDirectoryExist gDir
     if exists
@@ -224,3 +268,13 @@ subdirToDirname subdir =
         GentooConfs -> "gentoo"
 
 
+-- | The directory where GHC has all its libraries, etc.
+ghcLibDir :: MonadIO m => m GhcLibDir
+ghcLibDir = liftIO $ do
+    let args = ["--print-libdir"]
+    ghc <- findExe "ghc"
+    out <- readProcessOrDie ghc args
+    case listToMaybe (lines out) of
+        Just p  -> GhcLibDir <$> canonicalizePath p
+        Nothing -> die' $ unwords $
+            ["No output from:", ghc] ++ map show args

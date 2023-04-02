@@ -18,8 +18,13 @@ module Distribution.Gentoo.Types
     , VCatPkg
     , Slot
     , Package (..)
-      -- * GHC
     , Content (..)
+    , isDir
+    , pathOf
+    , VersionMappings
+    , ContentMappings
+    , PackageMappings
+      -- * GHC
     , GhcLibDir (..)
     , CabalPkg (..)
     , ConfSubdir (..)
@@ -27,15 +32,17 @@ module Distribution.Gentoo.Types
     , GhcConfMap (..)
     , GhcConfFiles (..)
     , GentooConfMap (..)
+    , CabalPkgMap
     ) where
 
-import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import qualified Distribution.InstalledPackageInfo as Cabal
     (InstalledPackageInfo (..))
 import qualified Distribution.Types.PackageId as Cabal
     (PackageId)
+
+import Distribution.Gentoo.Util
 
 
 -- -----------------------------------------------------------------------------
@@ -60,6 +67,18 @@ data Package = Package Category Pkg Slot
 data Content = Dir FilePath
              | Obj FilePath
                deriving (Eq, Show, Ord)
+
+isDir         :: Content -> Bool
+isDir (Dir _) = True
+isDir _       = False
+
+pathOf           :: Content -> FilePath
+pathOf (Dir dir) = dir
+pathOf (Obj obj) = obj
+
+type VersionMappings = Mappings VCatPkg Package
+type ContentMappings = Mappings VCatPkg Content
+type PackageMappings = Mappings Package Cabal.PackageId
 
 -- -----------------------------------------------------------------------------
 -- GHC-specific environment
@@ -90,7 +109,7 @@ data ConfSubdir = GHCConfs -- ^ GHC's database
                 | GentooConfs -- ^ assists @haskell-updater@
 
 -- | Unique (normal) or multiple (broken) mapping
-type ConfMap = Map.Map Cabal.PackageId (Set.Set CabalPkg)
+type ConfMap = MonoidMap Cabal.PackageId CabalPkg
 
 -- | The 'ConfMap' from GHC's package index
 newtype GhcConfMap
@@ -109,3 +128,7 @@ newtype GentooConfMap
     = GentooConfMap { getGentooConfMap :: ConfMap }
     deriving (Show, Eq, Ord, Semigroup, Monoid)
 
+-- | Mapping of 'CabalPkg's to their Cabal package name. This is useful for
+--   later generating the mapping between Portage 'Package's and Cabal
+--   'Cabal.PackageId's.
+type CabalPkgMap = MonoidMap FilePath Cabal.PackageId

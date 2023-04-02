@@ -15,8 +15,16 @@
  -}
 
 module Distribution.Gentoo.Util
-       ( ParseException (..)
+       (
+         -- * Monoidal maps
+         MonoidMap (..)
+       , monoidMap
+       , Mappings
+       , mappings
+         -- * Parse errors
+       , ParseException (..)
        , throwParseError
+         -- * Misc
        , concatMapM
        , breakAll
        , showPackageId
@@ -26,15 +34,16 @@ module Distribution.Gentoo.Util
        , readProcessOrDie
        , firstLine
        , die'
-       , ghcLibDir
        ) where
 
 import Control.Exception (Exception (..), throwIO)
 import Control.Monad.IO.Class
 import qualified Data.List as L
+import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe)
+import qualified Data.Set as Set
 import Data.Typeable (Typeable)
-import System.Directory (findExecutable, canonicalizePath)
+import System.Directory (findExecutable)
 import System.Exit (ExitCode (..))
 import System.Process (readProcess, readProcessWithExitCode)
 import Text.Parsec.Error (ParseError)
@@ -47,6 +56,29 @@ import qualified Distribution.Types.PackageId as Cabal
     )
 import qualified Distribution.Simple.Utils as Cabal (die')
 import qualified Distribution.Verbosity as V
+
+-- | A mapping that utilizes the semigroup instance of 'Set.Set' when
+--   using '<>'.
+newtype MonoidMap k v = MonoidMap
+    { unMonoidMap :: Map.Map k (Set.Set v) }
+    deriving (Show, Eq, Ord)
+
+instance (Ord k, Ord v) => Semigroup (MonoidMap k v) where
+    MonoidMap m1 <> MonoidMap m2
+        = MonoidMap $ Map.unionWith (<>) m1 m2
+
+instance (Ord k, Ord v) => Monoid (MonoidMap k v) where
+    mempty = MonoidMap Map.empty
+
+-- | "Smart constructor" for a 'MonoidMap'
+monoidMap :: Ord k => k -> v -> MonoidMap k v
+monoidMap k = MonoidMap . Map.singleton k . Set.singleton
+
+-- | Two-way mappings between two sets of data
+type Mappings k v = (MonoidMap k v, MonoidMap v k)
+
+mappings :: (Ord k, Ord v) => k -> v -> Mappings k v
+mappings k v = (monoidMap k v, monoidMap v k)
 
 -- | Wrapper to give 'ParseError' an 'Exception' instance
 newtype ParseException = ParseException ParseError
@@ -118,14 +150,3 @@ firstLine = listToMaybe . lines
 --   command-line.
 die' :: MonadIO m => String -> m a
 die' = liftIO . Cabal.die' V.normal
-
--- | The directory where GHC has all its libraries, etc.
-ghcLibDir :: MonadIO m => m FilePath
-ghcLibDir = liftIO $ do
-    let args = ["--print-libdir"]
-    ghc <- findExe "ghc"
-    out <- readProcessOrDie ghc args
-    case listToMaybe (lines out) of
-        Just p  -> canonicalizePath p
-        Nothing -> die' $ unwords $
-            ["No output from:", ghc] ++ map show args

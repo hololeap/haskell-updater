@@ -34,6 +34,7 @@ import Distribution.Gentoo.Env
 import Distribution.Gentoo.GHC
 import Distribution.Gentoo.Packages
 import Distribution.Gentoo.PkgManager
+import Distribution.Gentoo.Types
 import Distribution.Gentoo.Util
 import Output
 
@@ -112,7 +113,7 @@ getTargetPackages t =
                           (broken, unknown_packages, unknown_files) <- brokenPkgs
                           printUnknownPackagesLn (map showPackageId (Set.toList unknown_packages))
                           printUnknownFilesLn (Set.toList unknown_files)
-                          pkgListPrintLn "broken" (notGHC (Set.toList broken))
+                          pkgListPrintLn "broken" $ Set.toList $ notGHC broken
 
                           return $ old <> broken
 
@@ -335,7 +336,7 @@ systemInfo rm t = do
     pName  <- liftIO getProgName
     let pVer = showVersion Paths.version
     pLoc <- findExe "ghc"
-    libDir <- ghcLibDir
+    GhcLibDir libDir <- ghcLibDir
     say $ "Running " ++ pName ++ "-" ++ pVer ++ " using GHC " ++ ver
     say $ "  * Executable: " ++ pLoc
     say $ "  * Library directory: " ++ libDir

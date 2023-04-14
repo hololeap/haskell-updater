@@ -30,6 +30,7 @@ import Control.Monad.IO.Class
 -- import Control.Monad.Reader
 import Data.Char (isDigit, isAlphaNum, isSpace)
 -- import Data.Either (fromRight)
+import Data.Foldable (foldMap')
 import Data.List (isPrefixOf)
 -- import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
@@ -170,10 +171,10 @@ resolveFiles
     -> ContentMappings
     -> Set FilePath
     -> MonoidMap FilePath Package
-resolveFiles (MonoidMap vMap, _) (_, MonoidMap cMap) = foldMap $ \p ->
+resolveFiles (MonoidMap vMap, _) (_, MonoidMap cMap) = foldMap' $ \p ->
     fromMaybe mempty
         $ M.lookup (Obj p) cMap
-        >>= foldMap (\v -> MonoidMap . M.singleton p <$> M.lookup v vMap)
+        >>= foldMap' (\v -> MonoidMap . M.singleton p <$> M.lookup v vMap)
 -- = M.fromList . expand <$> forPkg grep
 --   where
 --     fps' = S.map Obj fps
@@ -191,10 +192,10 @@ gatherMappings :: MonadIO m
     -> m (VersionMappings, ContentMappings, PackageMappings)
 gatherMappings (MonoidMap cPkgMap) = do
     categories <- installedCats
-    getAp $ flip foldMap categories $ \cat -> do
+    getAp $ flip foldMap' categories $ \cat -> do
         maybePkgs <- Ap $ liftIO $ listDirectory (pkgDBDir </> cat)
-        packages <- filterM (isPackage . (cat,)) maybePkgs
-        foldMap
+        packages <- gatherPackages cat maybePkgs
+        foldMap'
             (\pkg -> do
                 let vcp = (cat, pkg)
                 Ap $ parseContents vcp >>= mkMappings vcp)
@@ -213,13 +214,16 @@ gatherMappings (MonoidMap cPkgMap) = do
     mkMappings vcp cs = do
         pkg <- toPackage vcp
         let vMappings = mappings vcp pkg
-        let cMappings = foldMap (mappings vcp) cs
-        let pMappings = foldMap
-                (\c -> maybe mempty
-                    (foldMap $ mappings pkg)
-                    (M.lookup (pathOf c) cPkgMap))
-                cs
+        let (cMappings, pMappings) = foldMap' (\c ->
+                ( mappings vcp c
+                , maybe mempty
+                    (foldMap' $ mappings pkg)
+                    (M.lookup (pathOf c) cPkgMap)
+                )) cs
         pure (vMappings, cMappings, pMappings)
+
+    gatherPackages :: MonadIO m => Category -> [VerPkg] -> Ap m [VerPkg]
+    gatherPackages cat = filterM (isPackage . (cat,))
 
 -- | Find which packages have Content information that matches the
 --   provided predicate; to be used with the searching predicates
@@ -232,7 +236,7 @@ pkgsHaveContent
 pkgsHaveContent (MonoidMap vMap, _) (_, MonoidMap cMap) p =
     let filtered = M.filterWithKey (\c _ -> p [c]) cMap
         vpkgs = S.unions $ M.elems filtered
-    in foldMap (vMap M.!) vpkgs
+    in foldMap' (vMap M.!) vpkgs
 
 -- Determine if this is a valid Category (such that at least one
 -- package in that category has been installed).

@@ -35,6 +35,7 @@ import Control.Monad.Writer
 import qualified Data.ByteString.Char8 as BS
 
 import qualified Data.Map.Strict as Map
+import Data.Foldable (foldMap')
 import Data.Functor.Identity(Identity(..))
 import Data.Maybe (listToMaybe)
 import Data.Sequence (Seq)
@@ -203,7 +204,7 @@ collectEnv v = runSayT v $ do
 -- create a Map
 foldConf :: (MonadSay m, MonadIO m, Foldable t)
     => t FilePath -> m (ConfMap, CabalPkgMap)
-foldConf = getAp . foldMap addConf
+foldConf = getAp . foldMap' addConf
 
 -- | Add this .conf file to the Map
 addConf :: (MonadSay m, MonadIO m)

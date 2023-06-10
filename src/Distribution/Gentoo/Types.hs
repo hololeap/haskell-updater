@@ -42,6 +42,7 @@ import qualified Distribution.InstalledPackageInfo as Cabal
 import qualified Distribution.Types.PackageId as Cabal
     (PackageId)
 
+import Data.MonoidMap (MonoidMap)
 import Distribution.Gentoo.Util
 
 

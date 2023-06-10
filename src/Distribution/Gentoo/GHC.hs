@@ -50,6 +50,7 @@ import qualified Distribution.Types.LibraryName as Cabal
     )
 
 -- haskell-updater imports
+import Data.MonoidMap (MonoidMap(..))
 import Distribution.Gentoo.Env
 import Distribution.Gentoo.Packages
 import Distribution.Gentoo.Types

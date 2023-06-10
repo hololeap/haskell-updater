@@ -57,6 +57,8 @@ import qualified Distribution.Types.PackageId as Cabal
     -- , PackageIdentifier(..)
     )
 
+import Data.MonoidMap (MonoidMap(..))
+import qualified Data.MonoidMap as MonoidMap
 import Distribution.Gentoo.Packages
 import Distribution.Gentoo.Types
 import Distribution.Gentoo.Util
@@ -243,7 +245,7 @@ pushConf
     -> FilePath
     -> Cabal.InstalledPackageInfo
     -> (ConfMap, CabalPkgMap)
-pushConf k p i = (monoidMap k (CabalPkg p i), monoidMap p k)
+pushConf k p i = (MonoidMap.singleton k (CabalPkg p i), MonoidMap.singleton p k)
 
 -- Return the Gentoo .conf files found in this GHC libdir
 listConfFiles :: MonadIO m => GhcLibDir -> ConfSubdir -> m (Set FilePath)

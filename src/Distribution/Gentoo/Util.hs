@@ -17,9 +17,7 @@
 module Distribution.Gentoo.Util
        (
          -- * Monoidal maps
-         MonoidMap (..)
-       , monoidMap
-       , Mappings
+         Mappings
        , mappings
          -- * Parse errors
        , ParseException (..)
@@ -39,9 +37,7 @@ module Distribution.Gentoo.Util
 import Control.Exception (Exception (..), throwIO)
 import Control.Monad.IO.Class
 import qualified Data.List as L
-import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe)
-import qualified Data.Set as Set
 import Data.Typeable (Typeable)
 import System.Directory (findExecutable)
 import System.Exit (ExitCode (..))
@@ -57,28 +53,14 @@ import qualified Distribution.Types.PackageId as Cabal
 import qualified Distribution.Simple.Utils as Cabal (die')
 import qualified Distribution.Verbosity as V
 
--- | A mapping that utilizes the semigroup instance of 'Set.Set' when
---   using '<>'.
-newtype MonoidMap k v = MonoidMap
-    { unMonoidMap :: Map.Map k (Set.Set v) }
-    deriving (Show, Eq, Ord)
-
-instance (Ord k, Ord v) => Semigroup (MonoidMap k v) where
-    MonoidMap m1 <> MonoidMap m2
-        = MonoidMap $ Map.unionWith (<>) m1 m2
-
-instance (Ord k, Ord v) => Monoid (MonoidMap k v) where
-    mempty = MonoidMap Map.empty
-
--- | "Smart constructor" for a 'MonoidMap'
-monoidMap :: Ord k => k -> v -> MonoidMap k v
-monoidMap k = MonoidMap . Map.singleton k . Set.singleton
+import qualified Data.MonoidMap as MMap
+import Data.MonoidMap (MonoidMap)
 
 -- | Two-way mappings between two sets of data
 type Mappings k v = (MonoidMap k v, MonoidMap v k)
 
 mappings :: (Ord k, Ord v) => k -> v -> Mappings k v
-mappings k v = (monoidMap k v, monoidMap v k)
+mappings k v = (MMap.singleton k v, MMap.singleton v k)
 
 -- | Wrapper to give 'ParseError' an 'Exception' instance
 newtype ParseException = ParseException ParseError

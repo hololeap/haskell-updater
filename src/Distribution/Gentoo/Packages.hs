@@ -47,6 +47,7 @@ import Text.Parsec
 import Text.Parsec.Text
 -- import Text.Read (readMaybe)
 
+import Data.MonoidMap (MonoidMap(..))
 import Distribution.Gentoo.Types
 import Distribution.Gentoo.Util
 

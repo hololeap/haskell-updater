@@ -2,9 +2,9 @@ name: Haskell CI
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, v2.0 ]
   pull_request:
-    branches: [ master ]
+    branches: [ master, v2.0 ]
 
 permissions:
   contents: read

@@ -3,6 +3,7 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 {- |
@@ -22,6 +23,7 @@ module Distribution.Gentoo.Util
          -- * Parse errors
        , ParseException (..)
        , throwParseError
+       , parseM
          -- * Misc
        , concatMapM
        , breakAll
@@ -34,14 +36,18 @@ module Distribution.Gentoo.Util
        , die'
        ) where
 
-import Control.Exception (Exception (..), throwIO)
+import Control.Monad.Catch
 import Control.Monad.IO.Class
-import qualified Data.List as L
+import Data.Functor.Identity
+-- import qualified Data.List as L
 import Data.Maybe (listToMaybe)
+import qualified Data.Text as T
+import Data.Text (Text)
 import Data.Typeable (Typeable)
 import System.Directory (findExecutable)
 import System.Exit (ExitCode (..))
 import System.Process (readProcess, readProcessWithExitCode)
+import Text.Parsec (Parsec, SourceName, Stream, parse)
 import Text.Parsec.Error (ParseError)
 import Text.PrettyPrint (render)
 
@@ -68,14 +74,18 @@ newtype ParseException = ParseException ParseError
     deriving newtype Show
     deriving anyclass Exception
 
-throwParseError :: MonadIO m => ParseError -> m a
-throwParseError = liftIO . throwIO . ParseException
+throwParseError :: MonadThrow m => ParseError -> m a
+throwParseError = throwM . ParseException
+
+parseM :: (Stream s Identity t, MonadThrow m)
+    => Parsec s () a -> SourceName -> s -> m a
+parseM p n = either throwParseError pure . parse p n
 
 concatMapM :: Applicative f => (a -> f [b]) -> [a] -> f [b]
 concatMapM f = fmap concat . traverse f
 
-breakAll :: (a -> Bool) -> [a] -> [[a]]
-breakAll p = L.groupBy (const (not . p))
+breakAll :: (Char -> Bool) -> Text -> [Text]
+breakAll p = T.groupBy (const (not . p))
 
 -- | Get only the first line of output
 rawSysStdOutLine :: MonadIO m => FilePath -> [String] -> m String

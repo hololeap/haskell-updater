@@ -49,21 +49,57 @@ common all
   if flag(pedantic)
     ghc-options: -Werror
 
+library haskell-updater-external-filepath
+  import:           all
+  hs-source-dirs:   filepath
+  default-language: Haskell2010
+
+  build-depends:
+    , base              >=4.9
+    , bytestring        >=0.11.3.0
+    , deepseq
+    , exceptions
+    , template-haskell
+
+  exposed-modules:
+    System.FilePath
+    System.FilePath.Posix
+    System.FilePath.Windows
+    System.OsPath
+    System.OsPath.Data.ByteString.Short
+    System.OsPath.Data.ByteString.Short.Internal
+    System.OsPath.Data.ByteString.Short.Word16
+    System.OsPath.Encoding
+    System.OsPath.Encoding.Internal
+    System.OsPath.Internal
+    System.OsPath.Posix
+    System.OsPath.Posix.Internal
+    System.OsPath.Types
+    System.OsPath.Windows
+    System.OsPath.Windows.Internal
+    System.OsString
+    System.OsString.Internal
+    System.OsString.Internal.Types
+    System.OsString.Posix
+    System.OsString.Windows
+
 library haskell-updater-internal
   import:           all
   hs-source-dirs:   src
   default-language: Haskell2010
   build-depends:
+    , haskell-updater-external-filepath
     , base        >=4.13    && <5
     , bytestring
     , Cabal       >=1.8
     , containers
     , directory   >=1.2.5.0
-    , filepath
+    , exceptions
     , mtl
     , parsec
     , pretty
     , process
+    , text
 
   exposed-modules:
     Data.MonoidMap

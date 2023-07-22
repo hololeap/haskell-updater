@@ -1,6 +1,8 @@
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TupleSections #-}
 {-# OPTIONS_GHC -Wno-deferred-out-of-scope-variables #-}
 {- |
@@ -26,6 +28,7 @@ module Distribution.Gentoo.Packages
 
 -- import Control.Exception (throwIO)
 import Control.Monad
+import Control.Monad.Catch
 import Control.Monad.IO.Class
 -- import Control.Monad.Reader
 import Data.Char (isDigit, isAlphaNum, isSpace)
@@ -38,10 +41,11 @@ import Data.Maybe
 import Data.Monoid (Ap (..))
 import           Data.Set (Set)
 import qualified Data.Set as S
+import qualified Data.Text as T
 import System.Directory( doesDirectoryExist
 --                        , doesFileExist
                        , listDirectory)
-import System.FilePath ((</>))
+import System.OsPath
 import Text.Parsec
 -- import Text.Parsec.Char
 import Text.Parsec.Text
@@ -60,7 +64,7 @@ samePackageAs (Package c1 p1 _) (Package c2 p2 _)
   = c1 == c2 && p1 == p2
 
 ghcPkg :: Package
-ghcPkg = Package "dev-lang" "ghc" "0"
+ghcPkg = Package [osp| "dev-lang" |] "ghc" "0"
 
 -- Return all packages that are not a version of GHC.
 notGHC :: Set Package -> Set Package
@@ -69,36 +73,28 @@ notGHC = S.filter (isNot ghcPkg)
     isNot p1 = not . samePackageAs p1
 
 -- Pretty-print the Package name based on how PMs expect it
-printPkg :: Package -> String
-printPkg (Package c p s) = c ++ "/" ++ p ++ ":" ++ s
+printPkg :: MonadThrow m => Package -> m String
+printPkg (Package c p s) = do
+    cs <- decodeUtf c
+    pure $ cs ++ "/" ++ T.unpack p ++ ":" ++ T.unpack s
 
 -- Determine which slot the specific version of the package is in and
 -- create the appropriate Package value.
-toPackage :: MonadIO m => VCatPkg -> m Package
-toPackage cp@(c,vp) = do sl <- parseSlot cp
-                         let p = stripVersion vp
-                         return $ Package c p sl
+toPackage :: MonadThrow m => VCatPkg -> m Package
+toPackage cp@(c,vp) = do
+    sl <- parseSlot cp
+    p <- stripVersion vp
+    pure $ Package c p sl
 
 -- | Remove the version information from the package name.
-stripVersion :: VerPkg -> Pkg
-stripVersion = concat . takeUntilVer . breakAll partSep
-  where
-    partSep x = x `elem` ['-', '_']
+stripVersion :: MonadThrow m => VerPkg -> m Pkg
+stripVersion osPath = parseM parser "doot" osPath
 
-    -- Only the last bit that matches isVer is the real version bit.
-    -- Note that this doesn't check that the last non-version bit is
-    -- not a hyphen followed by digits.
-    takeUntilVer = concat . init . breakAll isVer
-
-    isVer as = isVerFront (init as) && isAlphaNum (last as)
-    isVerFront ('-':as) = all (\a -> isDigit a || a == '.') as
-    isVerFront _        = False
-
-pkgPath        :: VCatPkg -> FilePath
+pkgPath        :: VCatPkg -> OsPath
 pkgPath (c, vp) = pkgDBDir </> c </> vp
 
-pkgDBDir :: FilePath
-pkgDBDir = "/var/db/pkg"
+pkgDBDir :: OsPath
+pkgDBDir = [osp| "/var/db/pkg" |]
 
 -- -----------------------------------------------------------------------------
 
@@ -108,10 +104,10 @@ pkgDBDir = "/var/db/pkg"
 
 -- Searching predicates.
 
-hasContentMatching   :: (FilePath -> Bool) -> [Content] -> Bool
+hasContentMatching   :: (OsPath -> Bool) -> [Content] -> Bool
 hasContentMatching p = any (p . pathOf)
 
-hasDirMatching   :: (FilePath -> Bool) -> [Content] -> Bool
+hasDirMatching   :: (OsPath -> Bool) -> [Content] -> Bool
 hasDirMatching p = hasContentMatching p . filter isDir
 
 -- | Parse the CONTENTS file, gathering relevant file paths and building
@@ -124,7 +120,7 @@ parseContents cp =
         Left e -> throwParseError e
         Right ps -> pure ps
   where
-    cFile = pkgPath cp </> "CONTENTS"
+    cFile = pkgPath cp ++ "/" ++ "CONTENTS"
 
 -- | Parse a @CONTENTS@ file
 contentsParser :: Parser [Content]
@@ -154,7 +150,7 @@ parseSlot cp =
         Left e -> throwParseError e
         Right s -> pure s
   where
-    cFile = pkgPath cp </> "SLOT"
+    cFile = pkgPath cp </> [osp| "SLOT" |]
 
 slotParser :: Parser Slot
 slotParser = do

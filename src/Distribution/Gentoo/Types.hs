@@ -36,6 +36,8 @@ module Distribution.Gentoo.Types
     ) where
 
 import qualified Data.Set as Set
+import System.OsPath
+import Data.Text (Text)
 
 import qualified Distribution.InstalledPackageInfo as Cabal
     (InstalledPackageInfo (..))
@@ -53,27 +55,27 @@ import Distribution.Gentoo.Util
 -- Representation of a cat/pkgname in Gentoo.  Note that this is
 -- overly simplified.
 
-type Category = String
-type Pkg = String -- ^ Package name.
-type VerPkg = String -- ^ Package name with version.
+type Category = OsPath
+type Pkg = Text -- ^ Package name.
+type VerPkg = OsPath -- ^ Package name with version.
 type VCatPkg = (Category, VerPkg)
-type Slot = String
+type Slot = Text
 
 -- | When we are (re-)building packages, we don't care about the
 --   version, just the slot.
 data Package = Package Category Pkg Slot
-             deriving(Eq, Ord, Show, Read)
+             deriving(Eq, Ord, Show)
 
 -- | Representation of individual lines in a @CONTENTS@ file.
-data Content = Dir FilePath
-             | Obj FilePath
+data Content = Dir OsPath
+             | Obj OsPath
                deriving (Eq, Show, Ord)
 
 isDir         :: Content -> Bool
 isDir (Dir _) = True
 isDir _       = False
 
-pathOf           :: Content -> FilePath
+pathOf           :: Content -> OsPath
 pathOf (Dir dir) = dir
 pathOf (Obj obj) = obj
 

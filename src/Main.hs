@@ -15,6 +15,9 @@ module Main (main) where
 import Distribution.Gentoo.CmdLine
 import qualified Distribution.Gentoo.CmdLine.Types as CmdLine -- (CmdLineArgs, BuildTarget)
 import Distribution.Gentoo.GHC
+    ( oldGhcPkgs, brokenPkgs, allInstalledPackages
+    , ghcVersion, ghcLibDir, ghcLoc, unCPV
+    )
 import Distribution.Gentoo.Packages
 import Distribution.Gentoo.PkgManager
 import Distribution.Gentoo.Types as Types

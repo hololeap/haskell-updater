@@ -8,7 +8,10 @@
    packages to rebuild after a dep upgrade or a GHC upgrade.
 -}
 
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main (main) where
 
@@ -26,9 +29,9 @@ import Distribution.Gentoo.Util (These(..), toListNE)
 
 import           Control.Monad         (unless, when)
 import qualified Control.Monad         as CM
-import           Control.Monad.Reader  (runReaderT)
+import           Control.Monad.Reader  (runReaderT, MonadIO, liftIO)
 import           Control.Monad.State.Strict
-    (StateT, evalStateT, get, put, MonadIO, liftIO)
+    (StateT, evalStateT, get, put, MonadState)
 import           Data.Bifoldable       (bifoldMap)
 import           Data.Foldable         (toList)
 import qualified Data.List             as L
@@ -51,7 +54,7 @@ main = do args <- getArgs
               Left err -> die err
               Right (cmdArgs, rawArgs)  -> runAction cmdArgs rawArgs
 
-runAction :: CmdLine.CmdLineArgs -> RawPMArgs -> IO a
+runAction :: CmdLine.CmdLineArgs -> RawPMArgs -> IO ()
 runAction cmdArgs rawArgs = do
 
     mode <- either die pure $ mkHUMode cmdArgs rawArgs
@@ -68,7 +71,22 @@ runAction cmdArgs rawArgs = do
             vsay $ show (RunMode rm pm)
             vsay ""
 
-            runUpdater pm rawArgs (rm, getExtraRawArgs pm)
+            systemInfo pm rawArgs
+
+            bps <- getPackageState pm
+            let ps = buildPkgsPending bps
+
+            case runMode pm of
+                 Left (ListMode _) -> listPkgs ps
+                 Right (PortageListMode _) -> listPkgs ps
+                 _ -> evalStateT
+                    (runUpdater pm (rm, getExtraRawArgs pm))
+                    (bps, Seq.empty)
+  where
+    listPkgs :: PendingPackages -> Env ()
+    listPkgs ps = do
+        mapM_ (liftIO . putStrLn . printPkg) (getPkgs ps)
+        success "done!"
 
 dumpHistory :: MonadSay m => RunHistory -> m ()
 dumpHistory historySeq = do
@@ -90,102 +108,106 @@ dumpHistory historySeq = do
 --   holds the logic for what action to take after running @emerge@ (e.g. exit
 --   with success/error or continue to the next iteration).
 type UpdaterLoop m
-    =  BuildPkgs
-    -> RunHistory
+    =  m () -- ^ The next iteration of the loop
     -> m ()
 
--- | Run the main part of @haskell-updater@ (e.g. not @--help@ or
---   @--version@).
+-- | State between each run of an 'UpdaterLoop'
+type UpdateState =
+    ( BuildPkgs
+    , RunHistory
+    )
+
+-- | Run the main part of @haskell-updater@ (e.g. not @--help@,
+--   @--version@, or list mode). This expects the initial 'UpdateState' to
+--   reflect the initial state of the system.
 runUpdater
-    :: PkgManager
-    -> RawPMArgs
-    -> BuildPkgsIn Env
-    -> Env a
-runUpdater pkgMgr userArgs bpi = do
-    systemInfo pkgMgr userArgs
-    bps <- getPackageState pkgMgr
-    let ps = buildPkgsPending bps
-    case runMode pkgMgr of
-        Left (ListMode _) -> listPkgs ps
-        Right (PortageListMode _) -> listPkgs ps
-        _ -> case getLoopType pkgMgr of
-            UntilNoPending -> loopUntilNoPending bps Seq.empty
-            UntilNoChange -> loopUntilNoChange bps Seq.empty
-            NoLoop -> do
-                exitCode <- buildPkgs bps bpi
-                liftIO $ exitWith exitCode
+    :: forall m.
+        ( MonadSay m
+        , MonadPkgState m
+        , MonadWritePkgState m
+        , MonadIO m
+        , MonadState UpdateState m
+        )
+    => PkgManager
+    -> BuildPkgsIn m
+    -> m ()
+runUpdater pkgMgr bpi = do
+    case getLoopType pkgMgr of
+        UntilNoPending -> runLoop loopUntilNoPending
+        UntilNoChange -> runLoop loopUntilNoChange
+        NoLoop -> do
+            (bps, _) <- get
+            exitCode <- buildPkgs bps bpi
+            liftIO $ exitWith exitCode
     success "done!"
   where
-    listPkgs :: PendingPackages -> Env ()
-    listPkgs ps = do
-        mapM_ (liftIO . putStrLn . printPkg) (getPkgs ps)
-        success "done!"
+    loopUntilNoPending :: UpdaterLoop m
+    loopUntilNoPending loop = do
+        (bps, hist) <- get
+        let ps = buildPkgsPending bps
 
-    loopUntilNoPending :: UpdaterLoop Env
-    loopUntilNoPending bps hist
-        -- Stop when there are no more pending packages
-        | Set.null (getPkgs ps) = alertDone Nothing
+            -- Stop when there are no more pending packages
+        if  | Set.null (getPkgs ps) -> alertDone Nothing
 
-        -- Look to see if the current set of broken haskell packages matches
-        -- any in the history. If it does, this means we're in a loop
-        | getPkgs ps `elem` (fst <$> toList hist) = alertStuck hist Nothing
+            -- Look to see if the current set of broken haskell packages matches
+            -- any in the history. If it does, this means we're in a loop
+            | getPkgs ps `elem` (fst <$> toList hist) -> alertStuck hist Nothing
 
-        -- Otherwise, keep going
-        | otherwise = updateAndContinue loopUntilNoPending bps hist
+            -- Otherwise, keep going
+            | otherwise -> loop
 
-        where ps = buildPkgsPending bps
+    loopUntilNoChange :: UpdaterLoop m
+    loopUntilNoChange loop = do
+        (bps, hist) <- get
+        let ps = buildPkgsPending bps
 
-    loopUntilNoChange :: UpdaterLoop Env
-    loopUntilNoChange bps hist = case viewr hist of
-        -- If there is no history, the first update still needs to be run
-        EmptyR -> updateAndContinue loopUntilNoChange bps hist
+        case viewr hist of
+            -- If there is no history, the first update still needs to be run
+            EmptyR -> loop
 
-        -- There is at least one entry in the history
-        (prevHist :> (lastPkgSet, lastEC)) ->
-            let nothingChanged, cmdSuccess, noTargets :: Bool
+            -- There is at least one entry in the history
+            (prevHist :> (lastPkgSet, lastEC)) ->
+                let nothingChanged, cmdSuccess, noTargets :: Bool
 
-                -- Is the broken package set identical to what it was
-                -- before the last update?
-                nothingChanged = getPkgs ps == lastPkgSet
+                    -- Is the broken package set identical to what it was
+                    -- before the last update?
+                    nothingChanged = getPkgs ps == lastPkgSet
 
-                -- Did the last update command succeed?
-                cmdSuccess = case lastEC of
-                    ExitSuccess -> True
-                    ExitFailure _ -> False
+                    -- Did the last update command succeed?
+                    cmdSuccess = case lastEC of
+                        ExitSuccess -> True
+                        ExitFailure _ -> False
 
-                -- Are there no targets for the package manager?
-                noTargets = emptyTargets (buildPkgsTargets bps)
+                    -- Are there no targets for the package manager?
+                    noTargets = emptyTargets (buildPkgsTargets bps)
 
-                -- Alert that we're finished, but add a warning if there are
-                -- still broken packages on the system
-                done = alertDone $ if Set.null (getPkgs ps)
-                    then Nothing
-                    else Just successIncomplete
+                    -- Alert that we're finished, but add a warning if there are
+                    -- still broken packages on the system
+                    done = alertDone $ if Set.null (getPkgs ps)
+                        then Nothing
+                        else Just successIncomplete
 
-                -- Alert that we're stuck, but add a note if it failed on its
-                -- first run
-                stuck = alertStuck hist $ if Seq.null prevHist
-                    then Just stuckOnePass
-                    else Nothing
+                    -- Alert that we're stuck, but add a note if it failed on its
+                    -- first run
+                    stuck = alertStuck hist $ if Seq.null prevHist
+                        then Just stuckOnePass
+                        else Nothing
 
-            in case (nothingChanged, cmdSuccess) of
-                -- The success state: The last update completed and
-                -- nothing changed
-                (True, True) -> done
+                in case (nothingChanged, cmdSuccess) of
+                    -- The success state: The last update completed and
+                    -- nothing changed
+                    (True, True) -> done
 
-                -- Stuck state: The last update failed and nothing changed
-                (True, False) -> stuck
+                    -- Stuck state: The last update failed and nothing changed
+                    (True, False) -> stuck
 
-                (False, _)
-                    -- A change happened, but there are no more targets
-                    | noTargets -> done
+                    (False, _)
+                        -- A change happened, but there are no more targets
+                        | noTargets -> done
 
-                    -- A change happened and we have targets still: continue
-                    | otherwise -> updateAndContinue loopUntilNoChange bps hist
-
+                        -- A change happened and we have targets still: continue
+                        | otherwise -> loop
       where
-        ps = buildPkgsPending bps
-
         -- This mostly comes up with the 'UntilNoChange' loop type, so we'll limit
         -- it to that for now.
         stuckOnePass =
@@ -200,8 +222,10 @@ runUpdater pkgMgr userArgs bpi = do
             ]
 
     -- Rebuild the packages then retrieve fresh package state
-    updateAndContinue :: UpdaterLoop Env -> UpdaterLoop Env
-    updateAndContinue f bps hist = do
+    updateAndContinue :: UpdaterLoop m -> m ()
+    updateAndContinue loop = do
+        (bps, hist) <- get
+
         -- Exit with failure if there are no targets for the package manager
         when (emptyTargets (buildPkgsTargets bps)) alertNoTargets
 
@@ -211,7 +235,12 @@ runUpdater pkgMgr userArgs bpi = do
         let ps = buildPkgsPending bps'
             hist' = hist |> (getPkgs ps, exitCode)
 
-        f bps' hist'
+        put (bps', hist')
+
+        runLoop loop
+
+    runLoop :: UpdaterLoop m -> m ()
+    runLoop loop = loop (updateAndContinue loop)
 
     emptyTargets :: Set.Set Types.Target -> Bool
     emptyTargets = all $ \case

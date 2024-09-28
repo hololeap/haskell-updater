@@ -4,8 +4,11 @@
    General types needed for haskell-updater functionality
  -}
 
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeSynonymInstances #-}
 
 module Distribution.Gentoo.Types
   ( RunModifier(..)
@@ -20,11 +23,14 @@ module Distribution.Gentoo.Types
   , InvalidPkgs(..)
   , AllPkgs(..)
   , PackageSet(..)
+  , Env
   ) where
 
+import Control.Monad.Reader
 import qualified Data.Set as Set
 import qualified Data.Sequence as Seq
 import System.Exit (ExitCode(..))
+import System.IO (hPutStrLn, stderr)
 
 import Distribution.Gentoo.Packages
 import Distribution.Gentoo.PkgManager.Types
@@ -119,3 +125,9 @@ instance PackageSet () where
 instance PackageSet PendingPackages where
     getPkgs (InvalidPending p) = getPkgs p
     getPkgs (AllPending p) = getPkgs p
+
+type Env = ReaderT RunModifier IO
+
+instance MonadSay Env where
+    outputLn = liftIO . hPutStrLn stderr
+    askVerbosity = asks verbosity

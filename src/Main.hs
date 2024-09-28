@@ -26,7 +26,7 @@ import Distribution.Gentoo.Util (These(..), toListNE)
 
 import           Control.Monad         (unless, when)
 import qualified Control.Monad         as CM
-import           Control.Monad.Reader  (runReaderT, ask)
+import           Control.Monad.Reader  (runReaderT)
 import           Control.Monad.State.Strict
     (StateT, evalStateT, get, put, MonadIO, liftIO)
 import           Data.Bifoldable       (bifoldMap)
@@ -68,7 +68,7 @@ runAction cmdArgs rawArgs = do
             vsay $ show (RunMode rm pm)
             vsay ""
 
-            runUpdater pm rawArgs
+            runUpdater pm rawArgs (rm, getExtraRawArgs pm)
 
 dumpHistory :: MonadSay m => RunHistory -> m ()
 dumpHistory historySeq = do
@@ -99,8 +99,9 @@ type UpdaterLoop m
 runUpdater
     :: PkgManager
     -> RawPMArgs
+    -> BuildPkgsIn Env
     -> Env a
-runUpdater pkgMgr userArgs = do
+runUpdater pkgMgr userArgs bpi = do
     systemInfo pkgMgr userArgs
     bps <- getPackageState pkgMgr
     let ps = buildPkgsPending bps
@@ -110,8 +111,9 @@ runUpdater pkgMgr userArgs = do
         _ -> case getLoopType pkgMgr of
             UntilNoPending -> loopUntilNoPending bps Seq.empty
             UntilNoChange -> loopUntilNoChange bps Seq.empty
-            NoLoop -> ask >>= \rm -> liftIO $
-                buildPkgs rm rawArgs bps >>= exitWith
+            NoLoop -> do
+                exitCode <- buildPkgs bps bpi
+                liftIO $ exitWith exitCode
     success "done!"
   where
     listPkgs :: PendingPackages -> Env ()
@@ -203,7 +205,7 @@ runUpdater pkgMgr userArgs = do
         -- Exit with failure if there are no targets for the package manager
         when (emptyTargets (buildPkgsTargets bps)) alertNoTargets
 
-        exitCode <- ask >>= \rm -> liftIO $ buildPkgs rm rawArgs bps
+        exitCode <- buildPkgs bps bpi
 
         bps' <- getPackageState pkgMgr
         let ps = buildPkgsPending bps'
@@ -228,8 +230,6 @@ runUpdater pkgMgr userArgs = do
             : maybe [] ("":) maybeMsg
 
     alertNoTargets = liftIO $ die "No targets to pass to the package manager!"
-
-    rawArgs = getExtraRawArgs pkgMgr
 
 -- | As needed, query @ghc-pkg check@ for broken packages, scan the filesystem
 --   for installed packages, and look for misc breakages. Return the results

@@ -7,7 +7,10 @@
    This module defines ways to use different Gentoo package managers.
  -}
 
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeSynonymInstances #-}
 
 module Distribution.Gentoo.PkgManager
        ( definedPMs
@@ -21,7 +24,7 @@ module Distribution.Gentoo.PkgManager
        , BuildPkgs(..)
        , buildPkgsTargets
        , buildPkgsPending
-       , buildPkgs
+       , MonadWritePkgState(..)
        ) where
 
 import Distribution.Gentoo.Packages
@@ -29,6 +32,8 @@ import Distribution.Gentoo.PkgManager.Types
 import Distribution.Gentoo.Types
 import qualified Distribution.Gentoo.Types.HUMode as Mode
 
+import Control.Monad.Reader (ReaderT, lift)
+import Control.Monad.State.Strict (StateT)
 import Data.Char(toLower)
 import Data.Maybe(mapMaybe, fromMaybe)
 import qualified Data.Map as M
@@ -160,21 +165,37 @@ buildPkgsPending = \case
     BuildNormal _ pps _ -> pps
     BuildRAMode pps _ _ -> pps
 
-buildPkgs
-    :: RunModifier
-    -> ExtraRawArgs
-    -> BuildPkgs
-    -> IO ExitCode
-buildPkgs rm rawArgs bp = do
-    putStrLn ""
-    runCmd (withCmd rm) cmd args
-  where
-    (cmd, args) = case bp of
-        BuildNormal pkgMgr _ _ ->
-            let targs = buildPkgsTargets bp
-            in buildCmd pkgMgr (flags rm) rawArgs (rawPMArgs rm) targs
-        BuildRAMode pps targs allPkgs ->
-            buildRACmd (flags rm) rawArgs (rawPMArgs rm) pps targs allPkgs
+class Monad m => MonadWritePkgState m where
+    type BuildPkgsIn m -- ^ Extra input needed for 'buildPkgs'
+
+    buildPkgs
+        :: BuildPkgs
+        -> BuildPkgsIn m
+        -> m ExitCode
+
+instance MonadWritePkgState IO where
+    type BuildPkgsIn IO = (RunModifier, ExtraRawArgs)
+
+    buildPkgs bp (rm, rawArgs) = do
+        putStrLn ""
+        runCmd (withCmd rm) cmd args
+      where
+        (cmd, args) = case bp of
+            BuildNormal pkgMgr _ _ ->
+                let targs = buildPkgsTargets bp
+                in buildCmd pkgMgr (flags rm) rawArgs (rawPMArgs rm) targs
+            BuildRAMode pps targs allPkgs ->
+                buildRACmd (flags rm) rawArgs (rawPMArgs rm) pps targs allPkgs
+
+instance MonadWritePkgState m => MonadWritePkgState (ReaderT r m) where
+    type BuildPkgsIn (ReaderT r m) = BuildPkgsIn m
+
+    buildPkgs bp = lift . buildPkgs bp
+
+instance MonadWritePkgState m => MonadWritePkgState (StateT s m) where
+    type BuildPkgsIn (StateT s m) = BuildPkgsIn m
+
+    buildPkgs bp = lift . buildPkgs bp
 
 runCmd :: WithCmd -> String -> [String] -> IO ExitCode
 runCmd m cmd args = case m of

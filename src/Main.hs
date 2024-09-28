@@ -235,8 +235,9 @@ runUpdater pkgMgr userArgs = do
 --   for installed packages, and look for misc breakages. Return the results
 --   summarized for use with 'buildPkgs'.
 getPackageState
-    :: PkgManager
-    -> Env BuildPkgs
+    :: (MonadSay m, MonadPkgState m)
+    => PkgManager
+    -> m BuildPkgs
 getPackageState pkgMgr =
     case runMode pkgMgr of
         Left mode -> fromRunMode mode
@@ -275,8 +276,9 @@ getPackageState pkgMgr =
             pure $ BuildRAMode p ts aps
   where
     fromRunMode
-        :: RunMode
-        -> Env BuildPkgs
+        :: (MonadSay m, MonadPkgState m)
+        => RunMode
+        -> m BuildPkgs
     fromRunMode mode = do
         ps <- case getTarget mode of
             OnlyInvalid -> InvalidPending <$> getInvalid
@@ -326,8 +328,9 @@ getPackageState pkgMgr =
         say ""
 
     withIPCache
-        :: (InvalidPkgs -> a)
-        -> StateT (Maybe InvalidPkgs) Env a
+        :: (MonadSay m, MonadPkgState m)
+        => (InvalidPkgs -> a)
+        -> StateT (Maybe InvalidPkgs) m a
     withIPCache f = fmap f $ get >>= \case
         Nothing -> do
             ips <- getInvalid

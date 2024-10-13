@@ -118,10 +118,7 @@ getTarget (ListMode t) = t
 --   sense.
 getLoopType :: PkgManager -> LoopType
 getLoopType = \case
-    -- @--mode=reinstall-atoms@ should not loop if /only/ @--target=all@ is set
-    Portage (ReinstallAtomsMode (This AllInstalled)) -> NoLoop
-
-    -- otherwise, it should always use UntilNoChange
+    -- @--mode=reinstall-atoms@ should always use UntilNoChange
     Portage (ReinstallAtomsMode _) -> UntilNoChange
 
     -- @--target=preserved-rebuild@ should use UntilNoChange

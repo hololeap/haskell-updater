@@ -63,6 +63,8 @@ import           System.Environment    (getArgs, getProgName)
 
 import Output
 
+import Debug.Trace
+
 main :: IO ()
 main = do args <- getArgs
           defPM <- defaultPM
@@ -186,6 +188,13 @@ runUpdater = do
         (bps, hist) <- get
 
         let ps = buildPkgsPending bps
+
+        traceM $ unlines
+            [ "*** ps: " ++ show ps
+            , "*** hist: " ++ show hist
+            , "*** getPkgs ps: " ++ show (getPkgs ps)
+            , "*** isInHistory hist (getPkgs ps): " ++ show (isInHistory hist (getPkgs ps))
+            ]
 
             -- Stop when there are no more pending packages
         if  | Set.null (getPkgs ps) -> alertDone Nothing
@@ -364,6 +373,11 @@ getPackageState = askPkgManager >>= \pkgMgr ->
         ps <- case getTarget mode of
             OnlyInvalid -> InvalidPending <$> getInvalid
             AllInstalled -> AllPending <$> getAll
+        traceM $ unlines
+            [ "*** getTarget mode: " ++ show (getTarget mode)
+            , "*** ps: " ++ show ps
+            , "*** pkgMgr: " ++ show pkgMgr
+            ]
         pure $ BuildNormal pkgMgr ps Set.empty
 
     getInvalid :: (MonadSay m, MonadPkgState m) => m InvalidPkgs
@@ -380,6 +394,12 @@ getPackageState = askPkgManager >>= \pkgMgr ->
         printUnknownPackagesLn (map unCPV unknown_packages)
         printUnknownFilesLn unknown_files
         pkgListPrintLn "broken" (notGHC broken')
+
+        traceM $ unlines
+            [ "*** old: " ++ show old
+            , "*** broken': " ++ show broken
+            , "*** old <> broken': " ++ show (old <> broken')
+            ]
 
         return $ InvalidPkgs $ old <> broken'
 

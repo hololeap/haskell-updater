@@ -237,13 +237,9 @@ buildCmd mpm fs (ExtraRawArgs rawArgs) userArgs targs =
     ++ mapMaybe (flagRep pm) fs
     ++ rawArgs
     ++ userArgs
-    ++ excl
     ++ printTargets targs
     )
   where
-    excl = case pm of
-        Portage -> ["--usepkg=n"]
-        _ -> []
     pm = toPkgManager mpm
 
 -- | Alternative version of 'buildCmd' which uses experimental @emerge@
